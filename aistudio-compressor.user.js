@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AI Studio Chat Compressor
 // @namespace    https://fujimaodefuji.github.io/aistudio-compressor
-// @version      0.4.7
-// @description  在 Google AI Studio 提供一键压缩聊天记录、注入快照、监控 GenerateContent 请求的工具，完美兼容 Windows/Mac/iOS Safari | Facilitating long conversation continuation and history migration
+// @version      0.4.6
+// @description  在 Google AI Studio 提供一键压缩聊天记录、注入快照、监控 GenerateContent 请求的工具，完美兼容 Windows/Mac/iOS Safari Stay | Facilitating long conversation continuation and history migration
 // @author       fujimaodefuji
 // @match        https://aistudio.google.com/*
 // @run-at       document-start
@@ -115,6 +115,7 @@ The structure MUST be strictly as follows:
         },
         UI: {
             BUTTON_ID: "compressor-button-hybrid",
+            FAB_ID: "compressor-button-fab-mobile",
             TOOLBAR_SELECTORS: [
                 "ms-toolbar .toolbar-right",
                 "ms-playground-toolbar .toolbar-right",
@@ -164,7 +165,7 @@ The structure MUST be strictly as follows:
         get topWindow() { return getSafeTopWindow(); }
     };
 
-    const SCRIPT_VERSION = "0.4.7";
+    const SCRIPT_VERSION = "0.4.6";
 
     const state = {
         compressionInProgress: false,
@@ -268,6 +269,7 @@ The structure MUST be strictly as follows:
         alert("已恢复默认设置。");
     }
 
+    // 核心优化 1：最高优先级注册菜单
     function registerMenuCommands() {
         const reg = (caption, fn) => {
             try {
@@ -452,7 +454,7 @@ The structure MUST be strictly as follows:
             if (state.compressionInProgress) return;
             const textarea = UI.findInput();
             if (!textarea) {
-                alert("未找到输入框，请确保处于对话页面。");
+                alert("未找到输入框，请确保处于 prompts 对话页面。");
                 return;
             }
             const prompt = getCompressPrompt();
@@ -990,7 +992,7 @@ The structure MUST be strictly as follows:
     };
 
     // ---------------------------
-    // UI module（只保留优雅的原生顶栏按钮）
+    // UI module (全端自适应 + 强制手机悬浮球)
     // ---------------------------
 
     const UI = {
@@ -1019,13 +1021,17 @@ The structure MUST be strictly as follows:
                 if (!doc?.body) continue;
                 UI.ensureStyles(doc);
 
-                // 注入到右上角顶栏
                 if (!doc.getElementById(Config.UI.BUTTON_ID)) {
                     const toolbar = UI.findToolbar(doc);
                     if (toolbar) {
                         const button = UI.createButton(doc);
                         toolbar.appendChild(button);
                     }
+                }
+
+                if (!doc.getElementById(Config.UI.FAB_ID)) {
+                    const fab = UI.createMobileFab(doc);
+                    doc.body.appendChild(fab);
                 }
             }
         },
@@ -1052,6 +1058,19 @@ The structure MUST be strictly as follows:
             return button;
         },
 
+        createMobileFab(doc) {
+            const fab = doc.createElement("button");
+            fab.id = Config.UI.FAB_ID;
+            fab.title = "点击一键压缩记忆快照";
+            fab.type = "button";
+            fab.innerHTML = `
+                <span class="fab-icon">⚡</span>
+                <span class="fab-spinner"></span>
+            `;
+            fab.addEventListener("click", () => Compression.run());
+            return fab;
+        },
+
         ensureStyles(doc) {
             const styleId = `${Config.UI.BUTTON_ID}-style`;
             if (doc.getElementById(styleId)) return;
@@ -1072,6 +1091,32 @@ The structure MUST be strictly as follows:
 }
 #${Config.UI.BUTTON_ID}.compressor-loading .compressor-spinner { display: block; }
 #${Config.UI.BUTTON_ID}.compressor-loading .compressor-icon { display: none; }
+
+#${Config.UI.FAB_ID} {
+    position: fixed !important;
+    right: 20px !important;
+    bottom: 95px !important;
+    width: 52px !important;
+    height: 52px !important;
+    border-radius: 26px !important;
+    background: linear-gradient(135deg, #6366f1, #4f46e5) !important;
+    color: white !important;
+    box-shadow: 0 4px 18px rgba(79, 70, 229, 0.5) !important;
+    border: 2px solid rgba(255, 255, 255, 0.9) !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    z-index: 2147483647 !important;
+    font-size: 22px !important;
+    cursor: pointer !important;
+    touch-action: manipulation !important;
+}
+#${Config.UI.FAB_ID} .fab-spinner {
+    width: 22px; height: 22px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white;
+    border-radius: 50%; animation: aistudio-compressor-spin 0.8s linear infinite; display: none;
+}
+#${Config.UI.FAB_ID}.compressor-loading .fab-spinner { display: block; }
+#${Config.UI.FAB_ID}.compressor-loading .fab-icon { display: none; }
 `;
             (doc.head || doc.documentElement || doc.body)?.appendChild(style);
         },
@@ -1107,7 +1152,9 @@ The structure MUST be strictly as follows:
 
         setButtonLoading(isLoading) {
             const btn = document.getElementById(Config.UI.BUTTON_ID);
+            const fab = document.getElementById(Config.UI.FAB_ID);
             if (btn) btn.classList.toggle("compressor-loading", isLoading);
+            if (fab) fab.classList.toggle("compressor-loading", isLoading);
         }
     };
 
