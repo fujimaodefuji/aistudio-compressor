@@ -1,13 +1,10 @@
 // ==UserScript==
 // @name         AI Studio Chat Compressor
 // @namespace    https://fujimaodefuji.github.io/aistudio-compressor
-// @version      0.4.1
+// @version      0.4.2
 // @description  在 Google AI Studio 提供一键压缩聊天记录、注入快照、监控 GenerateContent 请求的工具，方便长对话续写与历史迁移 | Provides a one-click tool in Google AI Studio to compress chat history, inject snapshots, and monitor GenerateContent requests, facilitating long conversation continuation and history migration
 // @author       fujimaodefuji
-// @match        https://aistudio.google.com/prompts/*
-// @match        https://aistudio.google.com/prompts/new_chat
-// @match        https://aistudio.google.com/*prompts/*
-// @match        https://aistudio.google.com/*/*/prompts/*
+// @match        https://aistudio.google.com/*
 // @run-at       document-start
 // @grant        unsafeWindow
 // @grant        GM_registerMenuCommand
@@ -40,23 +37,23 @@
 
   <state_snapshot>
       <overall_goal>
-          <!-- A single, concise sentence describing the user's high-level objective. -->
+          [A single, concise sentence describing the user's high-level objective]
       </overall_goal>
 
       <key_knowledge>
-          <!-- Crucial facts, conventions, and constraints the agent must remember based on the conversation history. -->
+          [Crucial facts, conventions, and constraints the agent must remember based on conversation history]
       </key_knowledge>
 
       <file_system_state>
-          <!-- List files that have been created, read, modified, or deleted. -->
+          [List files that have been created, read, modified, or deleted]
       </file_system_state>
 
       <recent_actions>
-          <!-- A summary of the last few significant agent actions and their outcomes. -->
+          [A summary of the last few significant agent actions and their outcomes]
       </recent_actions>
 
       <current_plan>
-          <!-- The agent's step-by-step plan. Mark completed steps. -->
+          [The agent's step-by-step plan. Mark completed steps]
       </current_plan>
   </state_snapshot>`,
 
@@ -79,23 +76,23 @@ The structure MUST be strictly as follows:
 
 <state_snapshot>
 <scene_and_environment>
-<!-- 记录压缩前最后一刻所处的具体地理/房间坐标、时间点、周围光线与环境细节 -->
+[记录压缩前最后一刻所处的具体地理/房间坐标、时间点、周围光线与环境细节]
 </scene_and_environment>
 
 <physical_and_attire_state>
-<!-- 双方当前的姿态距离、身体接触状态、着装状态（衣物款式或解构状态）、生理疲惫/兴奋度与体能状态 -->
+[双方当前的姿态距离、身体接触状态、着装状态（衣物款式或解构状态）、生理疲惫/兴奋度与体能状态]
 </physical_and_attire_state>
 
 <emotional_dynamics>
-<!-- 当前的亲密水温、情绪基调、心理防线状态以及本次对话中体现出的依赖/调情/抚慰氛围 -->
+[当前的亲密水温、情绪基调、心理防线状态以及本次对话中体现出的依赖/调情/抚慰氛围]
 </emotional_dynamics>
 
 <recent_milestones_and_commitments>
-<!-- 仅记录本次对话中新发生的关键事件、新做出的承诺、新约定或新确立的情感突破（无新变动可留空） -->
+[仅记录本次对话中新发生的关键事件、新做出的承诺、新约定或新确立的情感突破（若无新变动填“无”）]
 </recent_milestones_and_commitments>
 
 <immediate_next_steps>
-<!-- 压缩发生瞬间，双方正悬停在哪个对话话题、待完成的身体动作或下一步行动 -->
+[压缩发生瞬间，双方正悬停在哪个对话话题、待完成的身体动作或下一步行动]
 </immediate_next_steps>
 </state_snapshot>`
   };
@@ -145,8 +142,8 @@ The structure MUST be strictly as follows:
       PAGE_URL: "https://fujimaodefuji.github.io/aistudio-compressor"
     },
     PROMPTS: {
-      FULL: PRESET_PROMPTS.coding,
-      SNIPPET: "You are the component that summarizes internal chat history"
+      FULL: PRESET_PROMPTS.narrative,
+      SNIPPET: "You are the Narrative & Context State Compressor"
     }
   };
 
@@ -156,7 +153,7 @@ The structure MUST be strictly as follows:
     topWindow: unsafeWindow?.top || window
   };
   const settingsOrigin = getSettingsOrigin();
-  const SCRIPT_VERSION = "0.4.0";
+  const SCRIPT_VERSION = "0.4.2";
 
   const state = {
     compressionInProgress: false,
@@ -183,10 +180,11 @@ The structure MUST be strictly as follows:
   };
 
   const STORAGE_KEY = "__aistudio_compressor_settings_v1";
+  // 默认值全部固化为优化后的叙事记忆版本
   const DEFAULT_SETTINGS = {
-    activePreset: "coding",
-    compressPrompt: Config.PROMPTS.FULL,
-    ackMessage: "Got it. Thanks for the additional context!",
+    activePreset: "narrative",
+    compressPrompt: PRESET_PROMPTS.narrative,
+    ackMessage: "（已同步最新状态与记忆快照，随时可以继续。）",
     snapshotRegex: "",
     tailPercent: 30,
     tailMinChars: 2000
@@ -327,10 +325,7 @@ The structure MUST be strictly as follows:
       attempts += 1;
       try {
         win.postMessage(message, targetOrigin);
-        log.ui("Sent settings hydration message", { attempts });
-      } catch (err) {
-        log.ui("Failed to send settings hydration message", err);
-      }
+      } catch (err) {}
       if (attempts >= maxAttempts) {
         clearInterval(timer);
       }
@@ -439,9 +434,7 @@ The structure MUST be strictly as follows:
       if (!ctx || !canAccessWindow(ctx)) continue;
       try {
         hookContext(ctx, `iframe ${frame.src || frame.name || "unnamed"} via ${reason}`);
-      } catch (err) {
-        log.net("cannot hook iframe:", err);
-      }
+      } catch (err) {}
     }
   }
 
@@ -500,9 +493,7 @@ The structure MUST be strictly as follows:
         headers,
         bodyText
       });
-    } catch (err) {
-      console.warn(Config.TAGS.NET, "Failed to read request body:", err);
-    }
+    } catch (err) {}
   }
 
   async function logResponsePayload(url, response) {
@@ -516,9 +507,7 @@ The structure MUST be strictly as follows:
         statusText: response.statusText,
         bodyText
       });
-    } catch (err) {
-      console.warn(Config.TAGS.NET, "Failed to read response body:", err);
-    }
+    } catch (err) {}
   }
 
   function installXHRHook(ctx, label) {
@@ -589,7 +578,6 @@ The structure MUST be strictly as follows:
     }
   }
 
-  // 修复：移除原项目中重复且错误的 resolveUrl 定义，仅保留纯净有效的 URL 解析
   function resolveUrl(url) {
     if (!url) return "";
     try {
@@ -626,13 +614,10 @@ The structure MUST be strictly as follows:
 
   const Compression = {
     run() {
-      if (state.compressionInProgress) {
-        log.ui("Compression already running");
-        return;
-      }
+      if (state.compressionInProgress) return;
       const textarea = UI.findInput();
       if (!textarea) {
-        alert("未找到 AI Studio 输入框，请确保处于对话页面。");
+        alert("未找到输入框，请确保处于 prompts 对话页面。");
         return;
       }
       const prompt = getCompressPrompt();
@@ -649,11 +634,7 @@ The structure MUST be strictly as follows:
       textarea.dispatchEvent(new Event("change", { bubbles: true }));
       enableSendButton();
       sendCompressionRequest(textarea).then(sent => {
-        if (sent) {
-          log.ui("Compression request sent");
-          return;
-        }
-        log.ui("Failed to trigger compression request; aborting this run");
+        if (sent) return;
         Compression.finalizeRun();
       });
     },
@@ -701,7 +682,6 @@ The structure MUST be strictly as follows:
       }
       const snapshot = extractStateSnapshot(data);
       if (!snapshot) {
-        log.net("No snapshot found in compression response");
         Compression.finalizeRun();
         return;
       }
@@ -853,7 +833,6 @@ The structure MUST be strictly as follows:
     if (!sanitizedTurns.length) return;
     const preserved = pickTailTurns(sanitizedTurns);
 
-    // 新增：支持可配置的 Ack 回复消息
     const ackReply = getAckMessage();
 
     const newTurns = [
@@ -1240,7 +1219,6 @@ The structure MUST be strictly as follows:
       state.branchInProgress = true;
       try {
         const promptChange = await Branching.branchFromHereViaCreatePrompt();
-        // 关键改造：保留多账号/项目前缀（如 /u/1/ 或 /projects/xxx/）
         const basePath = Branching.getPromptBasePath();
         location.assign(`${location.origin}${basePath}${promptChange.promptId}`);
       } catch (err) {
@@ -1288,7 +1266,6 @@ The structure MUST be strictly as follows:
       }
     },
 
-    // 兼容多级前缀下的 promptId 提取
     pickCreatedPromptId(payload, previousPromptId = null) {
       const topLevelPrompt = typeof payload?.[0] === "string" ? payload[0] : "";
       const topLevelMatch = topLevelPrompt.match(/(?:^|\/)prompts\/([^/?#]+)/);
@@ -1299,8 +1276,6 @@ The structure MUST be strictly as follows:
       return promptIds.find(id => id && id !== previousPromptId) || null;
     },
 
-    // 动态提取当前所在的 prompts 基础前缀
-    // 例如 "/u/1/prompts/" 或 "/projects/xxx/prompts/" 或 "/prompts/"
     getPromptBasePath() {
       const path = location.pathname || "";
       const match = path.match(/^(.*\/prompts\/)/);
@@ -1503,7 +1478,7 @@ The structure MUST be strictly as follows:
 
   function extractMutationPromptId(root) {
     const resourceName = typeof root?.[0] === "string" ? root[0] : "";
-    const match = resourceName.match(/prompts\/([^/?#]+)/);
+    const match = resourceName.match(/(?:^|\/)prompts\/([^/?#]+)/);
     return match ? match[1] : null;
   }
 
@@ -1512,7 +1487,6 @@ The structure MUST be strictly as follows:
       const entry = deepClone(turn.entry);
       entry[0] = turn?.text || "";
       entry[8] = turn?.role === "model" ? "model" : "user";
-      // 原逻辑是 /^prompts\//，改为兼容多级前缀
       if (Array.isArray(entry[21]) && typeof entry[21][0] === "string" && /(?:^|\/)prompts\//.test(entry[21][0])) {
         entry[21] = null;
       }
@@ -1594,7 +1568,6 @@ The structure MUST be strictly as follows:
       loadedAt: new Date().toISOString()
     };
     env.topWindow.__AISTUDIO_COMPRESSOR_RUNTIME__ = runtimeInfo;
-    console.info(Config.TAGS.UI, "Script version", runtimeInfo.version, "loaded", runtimeInfo);
 
     installTopLevelHandlers();
     registerMenuCommands();

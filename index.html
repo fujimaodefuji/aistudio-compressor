@@ -2,14 +2,13 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <title>AI Studio Compressor 设置 (v0.4.0)</title>
+  <title>AI Studio Compressor 设置 (v0.4.2)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
       --primary: #4f46e5;
       --primary-hover: #4338ca;
       --danger: #ef4444;
-      --danger-hover: #dc2626;
       --surface: #ffffff;
       --bg: #f8fafc;
       --border: #e2e8f0;
@@ -36,59 +35,44 @@
     .container {
       max-width: 820px;
       margin: 0 auto;
-      padding: 30px 20px;
+      padding: 24px 20px;
     }
 
     header {
-      margin-bottom: 24px;
+      margin-bottom: 20px;
       text-align: center;
     }
     header h1 {
       font-size: 26px;
       font-weight: 700;
-      margin: 0 0 8px;
+      margin: 0 0 6px;
       background: linear-gradient(135deg, #4f46e5, #818cf8);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
     header p {
       color: var(--text-sub);
-      font-size: 14px;
+      font-size: 13px;
       margin: 0;
     }
 
-    .nav-bar {
-      display: flex;
-      justify-content: flex-end;
-      margin-bottom: 16px;
-    }
-    .github-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 14px;
-      border-radius: 999px;
-      border: 1px solid var(--border);
-      background: var(--surface);
-      color: var(--text-main);
+    .notice-banner {
+      background: #eef2ff;
+      border: 1px solid #c7d2fe;
+      color: #3730a3;
+      padding: 10px 14px;
+      border-radius: 8px;
       font-size: 13px;
-      font-weight: 500;
-      text-decoration: none;
-      box-shadow: var(--shadow);
-      transition: all 0.2s;
-    }
-    .github-link svg { width: 16px; height: 16px; }
-    .github-link:hover {
-      border-color: var(--primary);
-      transform: translateY(-1px);
+      margin-bottom: 16px;
+      display: none;
     }
 
     .card {
       background: var(--surface);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
-      padding: 22px;
-      margin-bottom: 20px;
+      padding: 20px;
+      margin-bottom: 18px;
       border: 1px solid var(--border);
     }
 
@@ -96,17 +80,16 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 14px;
+      margin-bottom: 12px;
     }
     .card-title {
-      font-size: 16px;
+      font-size: 15px;
       font-weight: 600;
       color: var(--text-main);
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 6px;
     }
-    .card-title svg { width: 18px; height: 18px; color: var(--text-sub); }
 
     label {
       display: block;
@@ -129,9 +112,9 @@
       border-radius: 8px;
       border: 1px solid var(--border);
       background: var(--surface);
-      font-size: 14px;
-      transition: all 0.2s;
+      font-size: 13px;
       color: var(--text-main);
+      transition: all 0.2s;
     }
 
     textarea:focus, select:focus, input:focus {
@@ -144,16 +127,11 @@
       font-family: var(--code-font);
       font-size: 13px;
       line-height: 1.6;
-      min-height: 240px;
+      min-height: 250px;
       background: #fafafa;
       white-space: pre;
       overflow-wrap: normal;
       overflow-x: auto;
-    }
-
-    input.code-line {
-      font-family: var(--code-font);
-      background: #fafafa;
     }
 
     .preset-select-bar {
@@ -161,23 +139,18 @@
       gap: 12px;
       align-items: center;
       background: var(--input-bg);
-      padding: 12px 16px;
+      padding: 10px 14px;
       border-radius: 8px;
-      margin-bottom: 14px;
+      margin-bottom: 12px;
       border: 1px solid var(--border);
-    }
-    .preset-select-bar select {
-      flex: 1;
-      background: white;
-      font-weight: 500;
     }
 
     .memory-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 16px;
+      gap: 14px;
       background: var(--input-bg);
-      padding: 14px;
+      padding: 12px;
       border-radius: 8px;
       border: 1px solid var(--border);
     }
@@ -189,12 +162,8 @@
       background: rgba(255,255,255,0.7);
       padding: 8px 12px;
       border-radius: 6px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
       border: 1px dashed var(--border);
     }
-    .math-explainer strong { color: var(--primary); }
 
     .actions-bar {
       position: sticky;
@@ -208,7 +177,6 @@
       justify-content: flex-end;
       gap: 10px;
       border: 1px solid var(--border);
-      margin-top: 20px;
     }
 
     button {
@@ -228,28 +196,19 @@
     button.primary {
       background: var(--primary);
       color: white;
-      box-shadow: 0 2px 5px rgba(79, 70, 229, 0.3);
     }
-    button.primary:hover { background: var(--primary-hover); transform: translateY(-1px); }
+    button.primary:hover { background: var(--primary-hover); }
 
     button.secondary {
       background: white;
       border-color: var(--border);
       color: var(--text-main);
     }
-    button.secondary:hover { background: var(--input-bg); border-color: #cbd5e1; }
 
     button.danger {
       background: white;
       border-color: #fecaca;
       color: var(--danger);
-    }
-    button.danger:hover { background: #fef2f2; border-color: #fca5a5; }
-
-    button.small {
-      padding: 5px 10px;
-      font-size: 12px;
-      height: 30px;
     }
 
     .toast-container {
@@ -266,21 +225,11 @@
       padding: 8px 18px;
       border-radius: 50px;
       font-size: 13px;
-      box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
       opacity: 0;
       transform: translateY(-20px);
       transition: all 0.3s cubic-bezier(0.68, -0.55, 0.27, 1.55);
     }
-    .toast.show {
-      opacity: 1;
-      transform: translateY(0);
-    }
-
-    @media (max-width: 600px) {
-      .memory-grid { grid-template-columns: 1fr; }
-      .actions-bar { flex-direction: column-reverse; bottom: 0; border-radius: 0; }
-      .actions-bar button { width: 100%; }
-    }
+    .toast.show { opacity: 1; transform: translateY(0); }
   </style>
 </head>
 <body>
@@ -289,105 +238,71 @@
 </div>
 
 <div class="container">
-  <div class="nav-bar">
-    <a class="github-link" href="https://github.com/fujimaodefuji/aistudio-compressor" target="_blank" rel="noopener noreferrer">
-      <svg viewBox="0 0 24 24" fill="currentColor">
-        <path d="M12 .5C5.73.5.5 5.74.5 12.02c0 5.09 3.29 9.4 7.86 10.93.58.11.8-.25.8-.57 0-.28-.01-1.02-.02-2-3.2.7-3.88-1.55-3.88-1.55-.53-1.36-1.3-1.72-1.3-1.72-1.06-.72.08-.71.08-.71 1.17.08 1.79 1.2 1.79 1.2 1.04 1.79 2.74 1.27 3.41.97.11-.75.41-1.26.74-1.55-2.56-.29-5.26-1.29-5.26-5.73 0-1.27.45-2.32 1.19-3.14-.12-.29-.52-1.45.11-3.01 0 0 .98-.32 3.21 1.2a11.1 11.1 0 0 1 5.84 0c2.23-1.52 3.21-1.2 3.21-1.2.63 1.56.23 2.72.11 3.01.74.82 1.19 1.87 1.19 3.14 0 4.46-2.7 5.44-5.28 5.73.42.36.8 1.08.8 2.19 0 1.58-.01 2.85-.01 3.24 0 .31.21.68.81.57A10.52 10.52 0 0 0 23.5 12C23.5 5.74 18.27.5 12 .5Z"/>
-      </svg>
-      <span>fujimaodefuji 仓库主页</span>
-    </a>
-  </div>
   <header>
     <h1>AI Studio Compressor 控制台</h1>
-    <p>轻松管理记忆快照模板、AI 应答风格与上下文历史保留策略</p>
+    <p>轻松管理记忆快照模板与应答策略 (v0.4.2)</p>
   </header>
 
+  <div id="opener-notice" class="notice-banner">
+    💡 <strong>提示：</strong>你当前是直接通过浏览器标签打开的设置页。若要修改并同步至 AI Studio，请在 AI Studio 网页里通过<strong>篡改猴菜单的「打开 Compressor 设置...」</strong>进入。
+  </div>
+
   <form id="compressor-settings-form">
-    <!-- Prompt 模板切换与编辑卡片 -->
     <div class="card">
       <div class="card-header">
-                    <span class="card-title">
-                        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                        </svg>
-                        压缩指令模板 (System Prompt)
-                    </span>
-        <div style="display:flex; gap:8px;">
-          <button type="button" class="secondary small" id="btn-copy-prompt" title="复制当前内容">复制</button>
-        </div>
+        <span class="card-title">压缩指令模板 (System Prompt)</span>
+        <button type="button" class="secondary" id="btn-copy-prompt" style="padding: 4px 10px; font-size:12px;">复制当前 Prompt</button>
       </div>
 
       <div class="preset-select-bar">
         <label style="margin: 0; white-space: nowrap;">预设模板：</label>
         <select id="preset-select">
+          <option value="narrative" selected>📖 互动叙事 / 关系记忆 (Narrative & Roleplay) [默认]</option>
           <option value="coding">💻 代码开发 / 任务重构 (Coding & Task)</option>
-          <option value="narrative">📖 互动叙事 / 关系记忆 (Narrative & Roleplay)</option>
           <option value="custom">⚙️ 自定义模式 (Custom)</option>
         </select>
       </div>
 
-      <div class="description">
-        这是发送给模型的结构化提炼指令。定义了输出的 XML 快照模块。
-      </div>
       <textarea id="field-prompt" name="compressPrompt" class="code-editor" spellcheck="false"></textarea>
     </div>
 
-    <!-- 自定义回复与正则卡片 -->
     <div class="card">
       <div class="card-header">
-                    <span class="card-title">
-                        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                        </svg>
-                        分支注入与提取设置
-                    </span>
+        <span class="card-title">分支注入与提取设置</span>
       </div>
 
-      <div style="margin-bottom: 16px;">
+      <div style="margin-bottom: 14px;">
         <label>快照确认应答 (Ack Message)</label>
-        <div class="description">
-          派生新对话分支时，作为模型接纳快照的第一句应答语（可改成中文或符合角色口吻的话语）。
-        </div>
-        <input id="field-ack" class="code-line" name="ackMessage" type="text" placeholder="Got it. Thanks for the additional context!" />
+        <div class="description">新分支建立时模型的第一句回复。</div>
+        <input id="field-ack" name="ackMessage" type="text" />
       </div>
 
       <div>
         <label>快照提取正则 (Snapshot Regex)</label>
-        <div class="description">
-          用于从模型回复中提取指定标签。默认留空即可自动捕获整个回复。
-        </div>
-        <input id="field-regex" class="code-line" name="snapshotRegex" type="text" placeholder="<state_snapshot>[\s\S]*?</state_snapshot>" />
+        <div class="description">留空则自动截取整个回复。</div>
+        <input id="field-regex" name="snapshotRegex" type="text" placeholder="<state_snapshot>[\s\S]*?</state_snapshot>" />
       </div>
     </div>
 
-    <!-- 历史记录保留策略卡片 -->
     <div class="card">
       <div class="card-header">
-                    <span class="card-title">
-                        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                        历史消息保留策略
-                    </span>
+        <span class="card-title">历史保留策略</span>
       </div>
       <div class="memory-grid">
         <div class="math-explainer">
-          <span>💡 计算规则：保留字数 = MAX ( <strong>总字数 × 百分比</strong> , <strong>最少保留字数</strong> )</span>
+          <span>💡 计算规则：保留字数 = MAX ( 总字数 × 百分比 , 最少保留字数 )</span>
         </div>
         <div>
           <label>保留尾部百分比 (%)</label>
-          <input id="field-percent" name="tailPercent" type="number" min="0" max="100" step="1" />
-          <div class="description" style="margin-top:6px; font-size:12px;">建议 20% - 40%</div>
+          <input id="field-percent" name="tailPercent" type="number" min="0" max="100" />
         </div>
         <div>
           <label>最少保留字符数 (Chars)</label>
           <input id="field-minchars" name="tailMinChars" type="number" min="0" step="100" />
-          <div class="description" style="margin-top:6px; font-size:12px;">防止短对话丢失上文</div>
         </div>
       </div>
     </div>
 
-    <!-- 底部操作栏 -->
     <div class="actions-bar">
       <div style="margin-right: auto;">
         <button type="button" class="danger" id="btn-reset">恢复初始默认</button>
@@ -419,23 +334,23 @@
 
   <state_snapshot>
       <overall_goal>
-          <!-- A single, concise sentence describing the user's high-level objective. -->
+          [A single, concise sentence describing the user's high-level objective]
       </overall_goal>
 
       <key_knowledge>
-          <!-- Crucial facts, conventions, and constraints the agent must remember based on the conversation history. -->
+          [Crucial facts, conventions, and constraints the agent must remember based on conversation history]
       </key_knowledge>
 
       <file_system_state>
-          <!-- List files that have been created, read, modified, or deleted. -->
+          [List files that have been created, read, modified, or deleted]
       </file_system_state>
 
       <recent_actions>
-          <!-- A summary of the last few significant agent actions and their outcomes. -->
+          [A summary of the last few significant agent actions and their outcomes]
       </recent_actions>
 
       <current_plan>
-          <!-- The agent's step-by-step plan. Mark completed steps. -->
+          [The agent's step-by-step plan. Mark completed steps]
       </current_plan>
   </state_snapshot>`,
 
@@ -458,31 +373,31 @@ The structure MUST be strictly as follows:
 
 <state_snapshot>
 <scene_and_environment>
-<!-- 记录压缩前最后一刻所处的具体地理/房间坐标、时间点、周围光线与环境细节 -->
+[记录压缩前最后一刻所处的具体地理/房间坐标、时间点、周围光线与环境细节]
 </scene_and_environment>
 
 <physical_and_attire_state>
-<!-- 双方当前的姿态距离、身体接触状态、着装状态（衣物款式或解构状态）、生理疲惫/兴奋度与体能状态 -->
+[双方当前的姿态距离、身体接触状态、着装状态（衣物款式或解构状态）、生理疲惫/兴奋度与体能状态]
 </physical_and_attire_state>
 
 <emotional_dynamics>
-<!-- 当前的亲密水温、情绪基调、心理防线状态以及本次对话中体现出的依赖/调情/抚慰氛围 -->
+[当前的亲密水温、情绪基调、心理防线状态以及本次对话中体现出的依赖/调情/抚慰氛围]
 </emotional_dynamics>
 
 <recent_milestones_and_commitments>
-<!-- 仅记录本次对话中新发生的关键事件、新做出的承诺、新约定或新确立的情感突破（无新变动可留空） -->
+[仅记录本次对话中新发生的关键事件、新做出的承诺、新约定或新确立的情感突破（若无新变动填“无”）]
 </recent_milestones_and_commitments>
 
 <immediate_next_steps>
-<!-- 压缩发生瞬间，双方正悬停在哪个对话话题、待完成的身体动作或下一步行动 -->
+[压缩发生瞬间，双方正悬停在哪个对话话题、待完成的身体动作或下一步行动]
 </immediate_next_steps>
 </state_snapshot>`
   };
 
   const DEFAULT_SETTINGS = {
-    activePreset: "coding",
-    compressPrompt: PRESETS.coding,
-    ackMessage: "Got it. Thanks for the additional context!",
+    activePreset: "narrative",
+    compressPrompt: PRESETS.narrative,
+    ackMessage: "（已同步最新状态与记忆快照，随时可以继续。）",
     snapshotRegex: "",
     tailPercent: 30,
     tailMinChars: 2000
@@ -496,11 +411,12 @@ The structure MUST be strictly as follows:
   const regexField = document.getElementById("field-regex");
   const percentField = document.getElementById("field-percent");
   const minCharsField = document.getElementById("field-minchars");
-
-  const closeBtn = document.getElementById("btn-close");
-  const resetBtn = document.getElementById("btn-reset");
-  const copyBtn = document.getElementById("btn-copy-prompt");
+  const openerNotice = document.getElementById("opener-notice");
   const toastEl = document.getElementById("toast");
+
+  if (!window.opener) {
+    openerNotice.style.display = "block";
+  }
 
   function showToast(message) {
     toastEl.textContent = message;
@@ -524,7 +440,6 @@ The structure MUST be strictly as follows:
       localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
     } catch (err) {}
     if (window.opener && !window.opener.closed) {
-      // 安全通信目标源指向 AI Studio
       window.opener.postMessage({
         source: "aistudio-compressor",
         type: "update-settings",
@@ -534,7 +449,7 @@ The structure MUST be strictly as follows:
   }
 
   function populateForm(settings) {
-    presetSelect.value = settings.activePreset || "custom";
+    presetSelect.value = settings.activePreset || "narrative";
     promptField.value = settings.compressPrompt;
     ackField.value = settings.ackMessage || DEFAULT_SETTINGS.ackMessage;
     regexField.value = settings.snapshotRegex || "";
@@ -542,7 +457,6 @@ The structure MUST be strictly as follows:
     minCharsField.value = settings.tailMinChars;
   }
 
-  // 模板切换事件
   presetSelect.addEventListener("change", () => {
     const val = presetSelect.value;
     if (val === "coding") {
@@ -576,24 +490,22 @@ The structure MUST be strictly as follows:
       tailMinChars: normalizedMinChars
     };
     saveSettings(settings);
-    showToast("✅ 设置已保存并同步");
+    showToast("✅ 设置已保存");
   });
 
-  copyBtn.addEventListener("click", () => {
+  document.getElementById("btn-copy-prompt").addEventListener("click", () => {
     if (!promptField.value) return;
-    navigator.clipboard.writeText(promptField.value).then(() => {
-      showToast("📋 已复制到剪贴板");
-    });
+    navigator.clipboard.writeText(promptField.value).then(() => showToast("📋 已复制到剪贴板"));
   });
 
-  resetBtn.addEventListener("click", () => {
-    if (!confirm("确定要将所有设置恢复为默认值吗？")) return;
+  document.getElementById("btn-reset").addEventListener("click", () => {
+    if (!confirm("确定要恢复默认吗？")) return;
     saveSettings({ ...DEFAULT_SETTINGS });
     populateForm(DEFAULT_SETTINGS);
     showToast("♻️ 已恢复默认配置");
   });
 
-  closeBtn.addEventListener("click", () => window.close());
+  document.getElementById("btn-close").addEventListener("click", () => window.close());
 
   window.addEventListener("message", event => {
     if (!event.data || event.data.source !== "aistudio-compressor") return;
