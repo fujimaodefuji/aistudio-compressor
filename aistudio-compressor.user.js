@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AI Studio Chat Compressor
 // @namespace    https://fujimaodefuji.github.io/aistudio-compressor
-// @version      0.4.8
-// @description  在 Google AI Studio 提供一键压缩聊天记录、注入快照、监控 GenerateContent 请求的工具，完美兼容长对话与全平台设备 | Facilitating long conversation continuation and history migration
+// @version      0.4.9
+// @description  在 Google AI Studio 提供一键压缩聊天记录、注入快照、监控 GenerateContent 请求的工具，完美解决 Safari 流式卡死与分支跳转 | Facilitating long conversation continuation and history migration
 // @author       fujimaodefuji
 // @match        https://aistudio.google.com/*
 // @run-at       document-start
@@ -149,9 +149,7 @@ The structure MUST be strictly as follows:
 
     function getSafeTopWindow() {
         try {
-            if (typeof unsafeWindow !== "undefined" && unsafeWindow && unsafeWindow.top) {
-                return unsafeWindow.top;
-            }
+            if (typeof unsafeWindow !== "undefined" && unsafeWindow && unsafeWindow.top) return unsafeWindow.top;
         } catch (e) {}
         try {
             if (window.top) return window.top;
@@ -164,7 +162,7 @@ The structure MUST be strictly as follows:
         get topWindow() { return getSafeTopWindow(); }
     };
 
-    const SCRIPT_VERSION = "0.4.8";
+    const SCRIPT_VERSION = "0.4.9";
 
     const state = {
         compressionInProgress: false,
@@ -271,14 +269,10 @@ The structure MUST be strictly as follows:
     function registerMenuCommands() {
         const reg = (caption, fn) => {
             try {
-                if (typeof GM_registerMenuCommand === "function") {
-                    GM_registerMenuCommand(caption, fn);
-                } else if (typeof GM !== "undefined" && GM && typeof GM.registerMenuCommand === "function") {
-                    GM.registerMenuCommand(caption, fn);
-                }
+                if (typeof GM_registerMenuCommand === "function") GM_registerMenuCommand(caption, fn);
+                else if (typeof GM !== "undefined" && GM && typeof GM.registerMenuCommand === "function") GM.registerMenuCommand(caption, fn);
             } catch (err) {}
         };
-
         reg("⚡ 立即压缩当前会话 (Run Compression)", () => Compression.run());
         reg("⚙️ 打开 Compressor 设置...", () => openSettingsWindow());
         reg("♻️ 重置 Compressor 设置", () => resetSettingsToDefault());
@@ -322,6 +316,27 @@ The structure MUST be strictly as follows:
         try { installXHRHook(ctx); } catch (e) {}
     }
 
+    // 关键升级：流式 Reader 读取，彻底杜绝 Safari 挂起死锁
+    async function readStreamBodySafely(response) {
+        try {
+            const cloned = response.clone();
+            if (cloned.body && typeof cloned.body.getReader === "function") {
+                const reader = cloned.body.getReader();
+                const decoder = new TextDecoder();
+                let accumulated = "";
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (value) accumulated += decoder.decode(value, { stream: true });
+                    if (done) break;
+                }
+                return accumulated;
+            }
+            return await cloned.text();
+        } catch (e) {
+            return null;
+        }
+    }
+
     function installFetchHook(ctx) {
         if (!ctx || typeof ctx.fetch !== "function" || ctx.__aistudio_compressor_fetch_hooked) return;
         const originalFetch = ctx.fetch.bind(ctx);
@@ -334,26 +349,24 @@ The structure MUST be strictly as follows:
                 try {
                     const cloned = request.clone();
                     const bodyText = await cloned.text();
-                    const headers = Object.fromEntries(cloned.headers.entries());
-                    rememberGoogleApiKey(headers, cloned.url);
-                    emitNetworkEvent(Config.EVENTS.REQUEST, { url: cloned.url, headers, bodyText });
+                    rememberGoogleApiKeyFromRequest(request);
+                    emitNetworkEvent(Config.EVENTS.REQUEST, { url: cloned.url, bodyText });
                 } catch (e) {}
             }
 
             const response = await originalFetch(request);
 
             if (isGenerate || isResolve) {
-                try {
-                    const clonedRes = response.clone();
-                    const bodyText = await clonedRes.text();
-                    maybeCaptureResolvedPromptThread(request.url, bodyText);
-                    emitNetworkEvent(Config.EVENTS.RESPONSE, {
-                        url: request.url,
-                        status: response.status,
-                        statusText: response.statusText,
-                        bodyText
-                    });
-                } catch (e) {}
+                readStreamBodySafely(response).then(bodyText => {
+                    if (bodyText) {
+                        maybeCaptureResolvedPromptThread(request.url, bodyText);
+                        emitNetworkEvent(Config.EVENTS.RESPONSE, {
+                            url: request.url,
+                            status: response.status,
+                            bodyText
+                        });
+                    }
+                }).catch(() => {});
             }
             return response;
         };
@@ -395,8 +408,8 @@ The structure MUST be strictly as follows:
             realXHR.send = function (body) {
                 if (monitored) {
                     const absoluteUrl = resolveUrl(requestUrl);
-                    const bodyText = bodyToText(body);
                     rememberGoogleApiKey(requestHeaders, absoluteUrl);
+                    const bodyText = bodyToText(body);
                     emitNetworkEvent(Config.EVENTS.REQUEST, { url: absoluteUrl, headers: requestHeaders, bodyText });
                 }
                 return origSend.apply(this, arguments);
@@ -409,7 +422,6 @@ The structure MUST be strictly as follows:
                     emitNetworkEvent(Config.EVENTS.RESPONSE, {
                         url: responseUrl,
                         status: realXHR.status,
-                        statusText: realXHR.statusText,
                         bodyText: realXHR.responseText
                     });
                 }
@@ -418,12 +430,6 @@ The structure MUST be strictly as follows:
         }
         ctx.XMLHttpRequest = WrappedXHR;
         ctx.__aistudio_compressor_xhr_hooked = true;
-
-        try {
-            if (typeof unsafeWindow !== "undefined" && unsafeWindow && ctx !== unsafeWindow) {
-                unsafeWindow.XMLHttpRequest = WrappedXHR;
-            }
-        } catch (e) {}
     }
 
     function resolveUrl(url) {
@@ -444,8 +450,10 @@ The structure MUST be strictly as follows:
     }
 
     // ---------------------------
-    // Compression lifecycle
+    // Compression lifecycle (包含 DOM 终点自动捕获)
     // ---------------------------
+
+    let domWatchInterval = null;
 
     const Compression = {
         run() {
@@ -464,12 +472,11 @@ The structure MUST be strictly as follows:
             state.compressionResponsePending = false;
             UI.setButtonLoading(true);
 
-            // 发送指令
+            // 启动 DOM 视觉完成监听（双保险，大模型吐完字立刻自动派生）
+            Compression.startDOMWatch();
+
             sendCompressionRequest(textarea).then(sent => {
-                if (!sent) {
-                    log.ui("Failed to trigger run request");
-                    Compression.finalizeRun();
-                }
+                if (!sent) Compression.finalizeRun();
             });
         },
 
@@ -480,6 +487,36 @@ The structure MUST be strictly as follows:
             state.historyCapturePending = true;
             state.compressionRequestPending = false;
             state.compressionResponsePending = false;
+        },
+
+        // DOM 终点自动捕获器
+        startDOMWatch() {
+            if (domWatchInterval) clearInterval(domWatchInterval);
+            let checks = 0;
+            domWatchInterval = setInterval(() => {
+                if (!state.compressionInProgress) {
+                    clearInterval(domWatchInterval);
+                    return;
+                }
+                checks++;
+                // 如果发现屏幕上已经渲染出了完整的 </state_snapshot>，且已停笔
+                const snapshotText = extractSnapshotFromPageDOM();
+                const runBtn = UI.findSendButton();
+                const isRunAvailable = runBtn && !runBtn.disabled && !(runBtn.textContent || "").includes("Stop");
+
+                if (snapshotText && (isRunAvailable || checks > 15)) {
+                    log.ui("DOM Watcher: Snapshot completed on page! Triggering branch fork.");
+                    clearInterval(domWatchInterval);
+                    rebuildConversation(snapshotText);
+                    Compression.finalizeRun();
+                }
+
+                // 超时强制停止转圈，杜绝无休止卡死
+                if (checks > 120) {
+                    log.ui("Compression timeout, clearing loading state");
+                    Compression.finalizeRun();
+                }
+            }, 800);
         },
 
         handleRequestEvent(event) {
@@ -501,19 +538,19 @@ The structure MUST be strictly as follows:
         },
 
         handleResponseEvent(event) {
-            if (!state.compressionInProgress || !state.compressionResponsePending) return;
+            if (!state.compressionInProgress) return;
             const detail = event?.detail;
-            if (!detail?.bodyText) return Compression.finalizeRun();
-            const data = safeParseJSON(detail.bodyText);
-            if (!data) return Compression.finalizeRun();
-            const snapshot = extractStateSnapshot(data);
-            if (!snapshot) return Compression.finalizeRun();
-
-            rebuildConversation(snapshot).catch(err => log.net("Rebuild conversation failed", err));
-            Compression.finalizeRun();
+            if (!detail?.bodyText) return;
+            const snapshot = extractStateSnapshot(safeParseJSON(detail.bodyText) || detail.bodyText);
+            if (snapshot) {
+                if (domWatchInterval) clearInterval(domWatchInterval);
+                rebuildConversation(snapshot);
+                Compression.finalizeRun();
+            }
         },
 
         finalizeRun() {
+            if (domWatchInterval) clearInterval(domWatchInterval);
             state.compressionRequestPending = false;
             state.compressionResponsePending = false;
             state.compressionInProgress = false;
@@ -529,6 +566,16 @@ The structure MUST be strictly as follows:
             return variants.some(candidate => candidate && bodyText.includes(candidate));
         }
     };
+
+    function extractSnapshotFromPageDOM() {
+        try {
+            const bodyText = document.body ? document.body.innerText : "";
+            const match = bodyText.match(/<state_snapshot>[\s\S]*?<\/state_snapshot>/i);
+            return match ? match[0].trim() : null;
+        } catch (e) {
+            return null;
+        }
+    }
 
     function enableSendButton() {
         const sendButton = UI.findSendButton();
@@ -562,7 +609,6 @@ The structure MUST be strictly as follows:
         return true;
     }
 
-    // 核心重构：单次精准触发，严禁连续二次点击，杜绝误点 Stop 导致取消生成！
     async function sendCompressionRequest(textarea) {
         setTextareaValue(textarea, state.activeCompressionPrompt);
         textarea.focus();
@@ -570,19 +616,16 @@ The structure MUST be strictly as follows:
         textarea.dispatchEvent(new Event("input", { bubbles: true }));
         textarea.dispatchEvent(new Event("change", { bubbles: true }));
 
-        // 给 Angular 表单 120ms 反应时间
-        await delay(120);
+        await delay(150);
         enableSendButton();
 
         const btn = UI.findSendButton();
         if (btn) {
-            // 只触发一次点击，绝不连击
             dispatchPointerClickSequence(btn);
-            log.ui("Run button clicked precisely once");
+            log.ui("Run trigger fired once");
             return true;
         }
 
-        // 如果实在找不到按钮，才使用快捷键兜底一次
         const view = textarea.ownerDocument?.defaultView || window;
         const keyOptions = { key: "Enter", code: "Enter", keyCode: 13, bubbles: true, cancelable: true, view, ctrlKey: !env.isMac, metaKey: env.isMac };
         textarea.dispatchEvent(new view.KeyboardEvent("keydown", keyOptions));
@@ -601,23 +644,34 @@ The structure MUST be strictly as follows:
     }
 
     async function rebuildConversation(snapshotText) {
-        const turns = await getRebuildSourceTurns();
-        if (!turns.length) return;
-        const sanitizedTurns = stripCompressionArtifacts(turns);
-        if (!sanitizedTurns.length) return;
-        const preserved = pickTailTurns(sanitizedTurns);
-        const ackReply = getAckMessage();
+        log.net("Rebuilding conversation with snapshot");
+        try {
+            const turns = await getRebuildSourceTurns();
+            const sanitizedTurns = stripCompressionArtifacts(turns);
+            const preserved = pickTailTurns(sanitizedTurns);
+            const ackReply = getAckMessage();
 
-        const newTurns = [
-            createTurn("user", snapshotText),
-            createTurn("model", ackReply),
-            ...preserved
-        ];
-        state.pendingBranchTurns = newTurns;
-        Branching.branchFromHere().catch(err => log.net("Branch create failed", err));
+            const newTurns = [
+                createTurn("user", snapshotText),
+                createTurn("model", ackReply),
+                ...preserved
+            ];
+            state.pendingBranchTurns = newTurns;
+            await Branching.branchFromHere();
+        } catch (err) {
+            log.net("Branch create failed", err);
+            // 兜底保障：即使派生接口报错，也自动将快照写入剪贴板，绝不丢失心血！
+            try { navigator.clipboard.writeText(snapshotText); } catch (e) {}
+        } finally {
+            Compression.finalizeRun();
+        }
     }
 
     function extractStateSnapshot(events) {
+        if (typeof events === "string") {
+            const m = events.match(new RegExp(getSnapshotRegex(), "s")) || events.match(new RegExp(DEFAULT_SNAPSHOT_REGEX, "s"));
+            return m ? m[0].trim() : events.trim();
+        }
         const fullText = collectModelOutputText(events);
         if (!fullText) return null;
         const pattern = getSnapshotRegex();
@@ -730,17 +784,29 @@ The structure MUST be strictly as follows:
         return match ? decodeURIComponent(match[1]) : "";
     }
 
+    function rememberGoogleApiKeyFromRequest(request) {
+        try {
+            const keyFromHeader = request.headers.get("x-goog-api-key");
+            if (keyFromHeader) {
+                state.googleApiKey = keyFromHeader.trim();
+                return;
+            }
+            const urlObj = new URL(request.url);
+            const keyFromQuery = urlObj.searchParams.get("key");
+            if (keyFromQuery) state.googleApiKey = keyFromQuery.trim();
+        } catch (e) {}
+    }
+
     function rememberGoogleApiKey(headers, sourceUrl = "") {
-        const key = headers?.["x-goog-api-key"] || "";
-        if (key) {
-            state.googleApiKey = key.trim();
-            state.googleApiKeyUpdatedAt = Date.now();
-        }
+        if (!headers) return;
+        const normalized = {};
+        for (const [k, v] of Object.entries(headers)) normalized[k.toLowerCase()] = v;
+        const key = normalized["x-goog-api-key"] || "";
+        if (key) state.googleApiKey = String(key).trim();
     }
 
     function getGoogleApiKey() {
-        if (!state.googleApiKey) throw new Error("API key not captured yet");
-        return state.googleApiKey;
+        return state.googleApiKey || "";
     }
 
     async function buildSapisidAuthHeader() {
@@ -979,14 +1045,12 @@ The structure MUST be strictly as follows:
     };
 
     // ---------------------------
-    // UI module（只保留顶栏按钮）
+    // UI module
     // ---------------------------
 
     const UI = {
         init() {
-            const run = () => {
-                UI.injectButton();
-            };
+            const run = () => UI.injectButton();
             run();
             window.addEventListener("DOMContentLoaded", run);
             window.addEventListener("load", run);
@@ -1074,7 +1138,6 @@ The structure MUST be strictly as follows:
             return null;
         },
 
-        // 智能定位发送按钮
         findSendButton() {
             for (const doc of UI.getCandidateDocuments()) {
                 for (const selector of Config.UI.SEND_BUTTON_SELECTORS) {
