@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AI Studio Chat Compressor
 // @namespace    https://fujimaodefuji.github.io/aistudio-compressor
-// @version      0.4.8
-// @description  在 Google AI Studio 提供一键压缩聊天记录、注入快照、监控 GenerateContent 请求的工具，完美兼容长对话与全平台设备 | Facilitating long conversation continuation and history migration
+// @version      0.4.7
+// @description  在 Google AI Studio 提供一键压缩聊天记录、注入快照、监控 GenerateContent 请求的工具，完美兼容 Windows/Mac/iOS Safari | Facilitating long conversation continuation and history migration
 // @author       fujimaodefuji
 // @match        https://aistudio.google.com/*
 // @run-at       document-start
@@ -164,7 +164,7 @@ The structure MUST be strictly as follows:
         get topWindow() { return getSafeTopWindow(); }
     };
 
-    const SCRIPT_VERSION = "0.4.8";
+    const SCRIPT_VERSION = "0.4.7";
 
     const state = {
         compressionInProgress: false,
@@ -463,13 +463,13 @@ The structure MUST be strictly as follows:
             state.compressionRequestPending = true;
             state.compressionResponsePending = false;
             UI.setButtonLoading(true);
-
-            // 发送指令
+            setTextareaValue(textarea, prompt);
+            textarea.focus();
+            textarea.dispatchEvent(new InputEvent("input", { bubbles: true, data: prompt, inputType: "insertText" }));
+            textarea.dispatchEvent(new Event("change", { bubbles: true }));
+            enableSendButton();
             sendCompressionRequest(textarea).then(sent => {
-                if (!sent) {
-                    log.ui("Failed to trigger run request");
-                    Compression.finalizeRun();
-                }
+                if (!sent) Compression.finalizeRun();
             });
         },
 
@@ -541,6 +541,17 @@ The structure MUST be strictly as follows:
     }
 
     function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+    function nextFrame() { return new Promise(resolve => requestAnimationFrame(() => resolve())); }
+
+    async function waitForCompressionRequestCapture(timeoutMs = 1800) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            if (!state.compressionInProgress) return false;
+            if (state.compressionResponsePending || !state.compressionRequestPending) return true;
+            await delay(50);
+        }
+        return state.compressionResponsePending || !state.compressionRequestPending;
+    }
 
     function dispatchPointerClickSequence(el) {
         if (!el?.dispatchEvent) return false;
@@ -549,7 +560,7 @@ The structure MUST be strictly as follows:
         const cx = rect.left + (rect.width || 0) / 2;
         const cy = rect.top + (rect.height || 0) / 2;
 
-        try { el.focus({ preventScroll: true }); } catch (e) {}
+        try { el.focus({ preventScroll: true }); } catch (e) { try { el.focus(); } catch (err) {} }
 
         const steps = ["pointerdown", "mousedown", "pointerup", "mouseup", "click"];
         for (const type of steps) {
@@ -562,32 +573,32 @@ The structure MUST be strictly as follows:
         return true;
     }
 
-    // 核心重构：单次精准触发，严禁连续二次点击，杜绝误点 Stop 导致取消生成！
-    async function sendCompressionRequest(textarea) {
-        setTextareaValue(textarea, state.activeCompressionPrompt);
-        textarea.focus();
-        textarea.dispatchEvent(new InputEvent("input", { bubbles: true, data: state.activeCompressionPrompt, inputType: "insertText" }));
-        textarea.dispatchEvent(new Event("input", { bubbles: true }));
-        textarea.dispatchEvent(new Event("change", { bubbles: true }));
-
-        // 给 Angular 表单 120ms 反应时间
-        await delay(120);
-        enableSendButton();
-
-        const btn = UI.findSendButton();
-        if (btn) {
-            // 只触发一次点击，绝不连击
-            dispatchPointerClickSequence(btn);
-            log.ui("Run button clicked precisely once");
-            return true;
-        }
-
-        // 如果实在找不到按钮，才使用快捷键兜底一次
+    function triggerKeyboardSend(textarea) {
         const view = textarea.ownerDocument?.defaultView || window;
         const keyOptions = { key: "Enter", code: "Enter", keyCode: 13, bubbles: true, cancelable: true, view, ctrlKey: !env.isMac, metaKey: env.isMac };
         textarea.dispatchEvent(new view.KeyboardEvent("keydown", keyOptions));
         textarea.dispatchEvent(new view.KeyboardEvent("keyup", keyOptions));
-        return true;
+    }
+
+    async function sendPromptWithRetries(textarea, options = {}) {
+        const clickPlan = [0, 80, 220];
+        const verifyFn = options.verifyFn;
+        for (const ms of clickPlan) {
+            if (ms > 0) await delay(ms); else await nextFrame();
+            if (!state.compressionInProgress) return false;
+            enableSendButton();
+            const btn = UI.findSendButton();
+            if (btn) {
+                dispatchPointerClickSequence(btn);
+                if (!verifyFn || await verifyFn()) return true;
+            }
+        }
+        triggerKeyboardSend(textarea);
+        return !verifyFn || await verifyFn();
+    }
+
+    async function sendCompressionRequest(textarea) {
+        return sendPromptWithRetries(textarea, { verifyFn: () => waitForCompressionRequestCapture() });
     }
 
     function setTextareaValue(textarea, value) {
@@ -979,7 +990,7 @@ The structure MUST be strictly as follows:
     };
 
     // ---------------------------
-    // UI module（只保留顶栏按钮）
+    // UI module（只保留优雅的原生顶栏按钮）
     // ---------------------------
 
     const UI = {
@@ -1008,6 +1019,7 @@ The structure MUST be strictly as follows:
                 if (!doc?.body) continue;
                 UI.ensureStyles(doc);
 
+                // 注入到右上角顶栏
                 if (!doc.getElementById(Config.UI.BUTTON_ID)) {
                     const toolbar = UI.findToolbar(doc);
                     if (toolbar) {
@@ -1074,16 +1086,12 @@ The structure MUST be strictly as follows:
             return null;
         },
 
-        // 智能定位发送按钮
         findSendButton() {
             for (const doc of UI.getCandidateDocuments()) {
                 for (const selector of Config.UI.SEND_BUTTON_SELECTORS) {
                     const btn = doc.querySelector(selector);
                     if (btn) return btn;
                 }
-                const allBtns = Array.from(doc.querySelectorAll("button"));
-                const runBtn = allBtns.find(b => (b.textContent || "").includes("Run") || (b.getAttribute("aria-label") || "").includes("Run"));
-                if (runBtn) return runBtn;
             }
             return null;
         },
