@@ -1,13 +1,14 @@
 // ==UserScript==
-// @name         AI Studio Chat Compressor (PC Edition)
+// @name         AI Studio Chat Compressor
 // @namespace    https://fujimaodefuji.github.io/aistudio-compressor
-// @version      0.5.2-pc
-// @description  在 Google AI Studio 提供一键压缩聊天记录、注入快照、监控 GenerateContent 请求的工具 (PC 电脑专版) | Windows/Mac Chrome/Edge 专享稳定版
+// @version      0.4.9
+// @description  在 Google AI Studio 提供一键压缩聊天记录、注入快照、监控 GenerateContent 请求的工具，完美解决 Safari 流式卡死与分支跳转 | Facilitating long conversation continuation and history migration
 // @author       fujimaodefuji
 // @match        https://aistudio.google.com/*
 // @run-at       document-start
 // @grant        unsafeWindow
 // @grant        GM_registerMenuCommand
+// @grant        GM.registerMenuCommand
 // ==/UserScript==
 
 (function () {
@@ -118,9 +119,10 @@ The structure MUST be strictly as follows:
                 "ms-toolbar .toolbar-right",
                 "ms-playground-toolbar .toolbar-right",
                 "ms-playground-toolbar .toolbar-container .toolbar-right",
-                ".toolbar-right"
+                ".toolbar-right",
+                "header .right-actions",
+                ".header-actions"
             ],
-            TARGET_PATH: "/prompts/",
             INPUT_SELECTORS: [
                 "ms-autosize-textarea textarea",
                 'textarea[aria-label="Start typing a prompt"]',
@@ -145,13 +147,22 @@ The structure MUST be strictly as follows:
         }
     };
 
+    function getSafeTopWindow() {
+        try {
+            if (typeof unsafeWindow !== "undefined" && unsafeWindow && unsafeWindow.top) return unsafeWindow.top;
+        } catch (e) {}
+        try {
+            if (window.top) return window.top;
+        } catch (e) {}
+        return window;
+    }
+
     const env = {
         isMac: /Mac|iPhone|iPad/.test(navigator.platform),
-        isAppContext: location.pathname.startsWith("/app/"),
-        topWindow: unsafeWindow?.top || window
+        get topWindow() { return getSafeTopWindow(); }
     };
-    const settingsOrigin = getSettingsOrigin();
-    const SCRIPT_VERSION = "0.5.2-pc";
+
+    const SCRIPT_VERSION = "0.4.9";
 
     const state = {
         compressionInProgress: false,
@@ -241,68 +252,10 @@ The structure MUST be strictly as follows:
         state.activeCompressionSnippet = deriveSnippet(state.activeCompressionPrompt);
     }
 
-    function getSettingsOrigin() {
-        const url = Config.SETTINGS?.PAGE_URL;
-        if (!url) return null;
-        try { return new URL(url, location.href).origin; } catch { return null; }
-    }
-
-    function getSettingsSnapshot() {
-        return {
-            activePreset: userSettings?.activePreset || DEFAULT_SETTINGS.activePreset,
-            compressPrompt: userSettings?.compressPrompt || Config.PROMPTS.FULL,
-            ackMessage: userSettings?.ackMessage || DEFAULT_SETTINGS.ackMessage,
-            snapshotRegex: userSettings?.snapshotRegex || DEFAULT_SNAPSHOT_REGEX,
-            tailPercent: Number.isFinite(userSettings?.tailPercent) ? userSettings.tailPercent : DEFAULT_SETTINGS.tailPercent,
-            tailMinChars: Number.isFinite(userSettings?.tailMinChars) ? userSettings.tailMinChars : DEFAULT_SETTINGS.tailMinChars
-        };
-    }
-
-    function normalizeSettingsPayload(payload) {
-        if (!payload || typeof payload !== "object") return { ...DEFAULT_SETTINGS };
-        const next = { ...DEFAULT_SETTINGS };
-        if (typeof payload.activePreset === "string") next.activePreset = payload.activePreset;
-        if (typeof payload.compressPrompt === "string") next.compressPrompt = payload.compressPrompt.trim() || Config.PROMPTS.FULL;
-        if (typeof payload.ackMessage === "string") next.ackMessage = payload.ackMessage.trim() || DEFAULT_SETTINGS.ackMessage;
-        if (typeof payload.snapshotRegex === "string") next.snapshotRegex = payload.snapshotRegex.trim() || DEFAULT_SNAPSHOT_REGEX;
-        if (payload.tailPercent != null) {
-            const p = Number(payload.tailPercent);
-            if (Number.isFinite(p)) next.tailPercent = Math.min(Math.max(p, 0), 100);
-        }
-        if (payload.tailMinChars != null) {
-            const m = Number(payload.tailMinChars);
-            if (Number.isFinite(m) && m >= 0) next.tailMinChars = Math.floor(m);
-        }
-        return next;
-    }
-
-    function scheduleSettingsHydration(win) {
-        if (!win) return;
-        const targetOrigin = settingsOrigin || "*";
-        const message = { source: "aistudio-compressor", type: "hydrate", payload: getSettingsSnapshot() };
-        let attempts = 0;
-        const timer = setInterval(() => {
-            if (!win || win.closed || ++attempts >= 10) { clearInterval(timer); return; }
-            try { win.postMessage(message, targetOrigin); } catch (e) {}
-        }, 1200);
-    }
-
-    function installSettingsMessageBridge() {
-        window.addEventListener("message", event => {
-            if (!event?.data || event.data.source !== "aistudio-compressor") return;
-            if (settingsOrigin && event.origin !== settingsOrigin) return;
-            if (event.data.type === "update-settings" && event.data.payload) {
-                updateUserSettings(normalizeSettingsPayload(event.data.payload));
-                if (!state.compressionInProgress) refreshActivePromptFromSettings();
-            }
-        });
-    }
-
     function openSettingsWindow() {
         const targetUrl = Config.SETTINGS?.PAGE_URL;
         if (!targetUrl) return alert("未配置设置页面 URL。");
-        const win = window.open(targetUrl, "aistudio_compressor_settings", "width=750,height=800,resizable=yes,scrollbars=yes");
-        scheduleSettingsHydration(win);
+        window.open(targetUrl, "aistudio_compressor_settings", "width=750,height=800,resizable=yes,scrollbars=yes");
     }
 
     function resetSettingsToDefault() {
@@ -314,36 +267,74 @@ The structure MUST be strictly as follows:
     }
 
     function registerMenuCommands() {
-        if (typeof GM_registerMenuCommand !== "function") return;
-        GM_registerMenuCommand("⚡ 立即压缩当前会话 (Run Compression)", () => Compression.run());
-        GM_registerMenuCommand("⚙️ 打开 Compressor 设置...", () => openSettingsWindow());
-        GM_registerMenuCommand("♻️ 重置 Compressor 设置", () => resetSettingsToDefault());
+        const reg = (caption, fn) => {
+            try {
+                if (typeof GM_registerMenuCommand === "function") GM_registerMenuCommand(caption, fn);
+                else if (typeof GM !== "undefined" && GM && typeof GM.registerMenuCommand === "function") GM.registerMenuCommand(caption, fn);
+            } catch (err) {}
+        };
+        reg("⚡ 立即压缩当前会话 (Run Compression)", () => Compression.run());
+        reg("⚙️ 打开 Compressor 设置...", () => openSettingsWindow());
+        reg("♻️ 重置 Compressor 设置", () => resetSettingsToDefault());
     }
 
     function installTopLevelHandlers() {
-        if (!env.topWindow.__aistudio_compressor_handlers_installed) {
-            env.topWindow.addEventListener(Config.EVENTS.REQUEST, Compression.handleRequestEvent);
-            env.topWindow.addEventListener(Config.EVENTS.RESPONSE, Compression.handleResponseEvent);
-            env.topWindow.__aistudio_compressor_handlers_installed = true;
+        try {
+            const topWin = env.topWindow;
+            if (!topWin.__aistudio_compressor_handlers_installed) {
+                topWin.addEventListener(Config.EVENTS.REQUEST, Compression.handleRequestEvent);
+                topWin.addEventListener(Config.EVENTS.RESPONSE, Compression.handleResponseEvent);
+                topWin.__aistudio_compressor_handlers_installed = true;
+            }
+        } catch (e) {
+            window.addEventListener(Config.EVENTS.REQUEST, Compression.handleRequestEvent);
+            window.addEventListener(Config.EVENTS.RESPONSE, Compression.handleResponseEvent);
         }
     }
 
     function emitNetworkEvent(name, detail) {
-        try { env.topWindow.dispatchEvent(new CustomEvent(name, { detail })); } catch (err) {}
+        try {
+            env.topWindow.dispatchEvent(new CustomEvent(name, { detail }));
+        } catch (err) {
+            try { window.dispatchEvent(new CustomEvent(name, { detail })); } catch (e) {}
+        }
     }
 
     const NetworkMonitor = {
         init() {
-            hookContext(window);
-            window.addEventListener("DOMContentLoaded", () => hookContext(window));
-            window.addEventListener("load", () => hookContext(window));
+            try {
+                hookContext(window);
+                window.addEventListener("DOMContentLoaded", () => hookContext(window));
+                window.addEventListener("load", () => hookContext(window));
+            } catch (e) {}
         }
     };
 
     function hookContext(ctx) {
         if (!ctx) return;
-        installFetchHook(ctx);
-        installXHRHook(ctx);
+        try { installFetchHook(ctx); } catch (e) {}
+        try { installXHRHook(ctx); } catch (e) {}
+    }
+
+    // 关键升级：流式 Reader 读取，彻底杜绝 Safari 挂起死锁
+    async function readStreamBodySafely(response) {
+        try {
+            const cloned = response.clone();
+            if (cloned.body && typeof cloned.body.getReader === "function") {
+                const reader = cloned.body.getReader();
+                const decoder = new TextDecoder();
+                let accumulated = "";
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (value) accumulated += decoder.decode(value, { stream: true });
+                    if (done) break;
+                }
+                return accumulated;
+            }
+            return await cloned.text();
+        } catch (e) {
+            return null;
+        }
     }
 
     function installFetchHook(ctx) {
@@ -358,33 +349,34 @@ The structure MUST be strictly as follows:
                 try {
                     const cloned = request.clone();
                     const bodyText = await cloned.text();
-                    const headers = Object.fromEntries(cloned.headers.entries());
-                    rememberGoogleApiKey(headers, cloned.url);
-                    emitNetworkEvent(Config.EVENTS.REQUEST, { url: cloned.url, headers, bodyText });
+                    rememberGoogleApiKeyFromRequest(request);
+                    emitNetworkEvent(Config.EVENTS.REQUEST, { url: cloned.url, bodyText });
                 } catch (e) {}
             }
 
             const response = await originalFetch(request);
 
             if (isGenerate || isResolve) {
-                try {
-                    const clonedRes = response.clone();
-                    const bodyText = await clonedRes.text();
-                    maybeCaptureResolvedPromptThread(request.url, bodyText);
-                    emitNetworkEvent(Config.EVENTS.RESPONSE, {
-                        url: request.url,
-                        status: response.status,
-                        statusText: response.statusText,
-                        bodyText
-                    });
-                } catch (e) {}
+                readStreamBodySafely(response).then(bodyText => {
+                    if (bodyText) {
+                        maybeCaptureResolvedPromptThread(request.url, bodyText);
+                        emitNetworkEvent(Config.EVENTS.RESPONSE, {
+                            url: request.url,
+                            status: response.status,
+                            bodyText
+                        });
+                    }
+                }).catch(() => {});
             }
             return response;
         };
         ctx.__aistudio_compressor_fetch_hooked = true;
-        if (ctx !== unsafeWindow && typeof unsafeWindow.fetch === "function") {
-            unsafeWindow.fetch = ctx.fetch;
-        }
+
+        try {
+            if (typeof unsafeWindow !== "undefined" && unsafeWindow && ctx !== unsafeWindow) {
+                unsafeWindow.fetch = ctx.fetch;
+            }
+        } catch (e) {}
     }
 
     function installXHRHook(ctx) {
@@ -416,8 +408,8 @@ The structure MUST be strictly as follows:
             realXHR.send = function (body) {
                 if (monitored) {
                     const absoluteUrl = resolveUrl(requestUrl);
-                    const bodyText = bodyToText(body);
                     rememberGoogleApiKey(requestHeaders, absoluteUrl);
+                    const bodyText = bodyToText(body);
                     emitNetworkEvent(Config.EVENTS.REQUEST, { url: absoluteUrl, headers: requestHeaders, bodyText });
                 }
                 return origSend.apply(this, arguments);
@@ -430,7 +422,6 @@ The structure MUST be strictly as follows:
                     emitNetworkEvent(Config.EVENTS.RESPONSE, {
                         url: responseUrl,
                         status: realXHR.status,
-                        statusText: realXHR.statusText,
                         bodyText: realXHR.responseText
                     });
                 }
@@ -459,15 +450,17 @@ The structure MUST be strictly as follows:
     }
 
     // ---------------------------
-    // Compression lifecycle
+    // Compression lifecycle (包含 DOM 终点自动捕获)
     // ---------------------------
+
+    let domWatchInterval = null;
 
     const Compression = {
         run() {
             if (state.compressionInProgress) return;
             const textarea = UI.findInput();
             if (!textarea) {
-                alert("未找到输入框，请确保处于 prompts 对话页面。");
+                alert("未找到输入框，请确保处于对话页面。");
                 return;
             }
             const prompt = getCompressPrompt();
@@ -479,11 +472,8 @@ The structure MUST be strictly as follows:
             state.compressionResponsePending = false;
             UI.setButtonLoading(true);
 
-            setTextareaValue(textarea, prompt);
-            textarea.focus();
-            textarea.dispatchEvent(new InputEvent("input", { bubbles: true, data: prompt, inputType: "insertText" }));
-            textarea.dispatchEvent(new Event("change", { bubbles: true }));
-            enableSendButton();
+            // 启动 DOM 视觉完成监听（双保险，大模型吐完字立刻自动派生）
+            Compression.startDOMWatch();
 
             sendCompressionRequest(textarea).then(sent => {
                 if (!sent) Compression.finalizeRun();
@@ -497,6 +487,36 @@ The structure MUST be strictly as follows:
             state.historyCapturePending = true;
             state.compressionRequestPending = false;
             state.compressionResponsePending = false;
+        },
+
+        // DOM 终点自动捕获器
+        startDOMWatch() {
+            if (domWatchInterval) clearInterval(domWatchInterval);
+            let checks = 0;
+            domWatchInterval = setInterval(() => {
+                if (!state.compressionInProgress) {
+                    clearInterval(domWatchInterval);
+                    return;
+                }
+                checks++;
+                // 如果发现屏幕上已经渲染出了完整的 </state_snapshot>，且已停笔
+                const snapshotText = extractSnapshotFromPageDOM();
+                const runBtn = UI.findSendButton();
+                const isRunAvailable = runBtn && !runBtn.disabled && !(runBtn.textContent || "").includes("Stop");
+
+                if (snapshotText && (isRunAvailable || checks > 15)) {
+                    log.ui("DOM Watcher: Snapshot completed on page! Triggering branch fork.");
+                    clearInterval(domWatchInterval);
+                    rebuildConversation(snapshotText);
+                    Compression.finalizeRun();
+                }
+
+                // 超时强制停止转圈，杜绝无休止卡死
+                if (checks > 120) {
+                    log.ui("Compression timeout, clearing loading state");
+                    Compression.finalizeRun();
+                }
+            }, 800);
         },
 
         handleRequestEvent(event) {
@@ -518,19 +538,19 @@ The structure MUST be strictly as follows:
         },
 
         handleResponseEvent(event) {
-            if (!state.compressionInProgress || !state.compressionResponsePending) return;
+            if (!state.compressionInProgress) return;
             const detail = event?.detail;
-            if (!detail?.bodyText) return Compression.finalizeRun();
-            const data = safeParseJSON(detail.bodyText);
-            if (!data) return Compression.finalizeRun();
-            const snapshot = extractStateSnapshot(data);
-            if (!snapshot) return Compression.finalizeRun();
-
-            rebuildConversation(snapshot).catch(err => log.net("Rebuild conversation failed", err));
-            Compression.finalizeRun();
+            if (!detail?.bodyText) return;
+            const snapshot = extractStateSnapshot(safeParseJSON(detail.bodyText) || detail.bodyText);
+            if (snapshot) {
+                if (domWatchInterval) clearInterval(domWatchInterval);
+                rebuildConversation(snapshot);
+                Compression.finalizeRun();
+            }
         },
 
         finalizeRun() {
+            if (domWatchInterval) clearInterval(domWatchInterval);
             state.compressionRequestPending = false;
             state.compressionResponsePending = false;
             state.compressionInProgress = false;
@@ -546,6 +566,16 @@ The structure MUST be strictly as follows:
             return variants.some(candidate => candidate && bodyText.includes(candidate));
         }
     };
+
+    function extractSnapshotFromPageDOM() {
+        try {
+            const bodyText = document.body ? document.body.innerText : "";
+            const match = bodyText.match(/<state_snapshot>[\s\S]*?<\/state_snapshot>/i);
+            return match ? match[0].trim() : null;
+        } catch (e) {
+            return null;
+        }
+    }
 
     function enableSendButton() {
         const sendButton = UI.findSendButton();
@@ -580,13 +610,22 @@ The structure MUST be strictly as follows:
     }
 
     async function sendCompressionRequest(textarea) {
-        await delay(120);
+        setTextareaValue(textarea, state.activeCompressionPrompt);
+        textarea.focus();
+        textarea.dispatchEvent(new InputEvent("input", { bubbles: true, data: state.activeCompressionPrompt, inputType: "insertText" }));
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        textarea.dispatchEvent(new Event("change", { bubbles: true }));
+
+        await delay(150);
         enableSendButton();
+
         const btn = UI.findSendButton();
         if (btn) {
             dispatchPointerClickSequence(btn);
+            log.ui("Run trigger fired once");
             return true;
         }
+
         const view = textarea.ownerDocument?.defaultView || window;
         const keyOptions = { key: "Enter", code: "Enter", keyCode: 13, bubbles: true, cancelable: true, view, ctrlKey: !env.isMac, metaKey: env.isMac };
         textarea.dispatchEvent(new view.KeyboardEvent("keydown", keyOptions));
@@ -605,23 +644,34 @@ The structure MUST be strictly as follows:
     }
 
     async function rebuildConversation(snapshotText) {
-        const turns = await getRebuildSourceTurns();
-        if (!turns.length) return;
-        const sanitizedTurns = stripCompressionArtifacts(turns);
-        if (!sanitizedTurns.length) return;
-        const preserved = pickTailTurns(sanitizedTurns);
-        const ackReply = getAckMessage();
+        log.net("Rebuilding conversation with snapshot");
+        try {
+            const turns = await getRebuildSourceTurns();
+            const sanitizedTurns = stripCompressionArtifacts(turns);
+            const preserved = pickTailTurns(sanitizedTurns);
+            const ackReply = getAckMessage();
 
-        const newTurns = [
-            createTurn("user", snapshotText),
-            createTurn("model", ackReply),
-            ...preserved
-        ];
-        state.pendingBranchTurns = newTurns;
-        Branching.branchFromHere().catch(err => log.net("Branch create failed", err));
+            const newTurns = [
+                createTurn("user", snapshotText),
+                createTurn("model", ackReply),
+                ...preserved
+            ];
+            state.pendingBranchTurns = newTurns;
+            await Branching.branchFromHere();
+        } catch (err) {
+            log.net("Branch create failed", err);
+            // 兜底保障：即使派生接口报错，也自动将快照写入剪贴板，绝不丢失心血！
+            try { navigator.clipboard.writeText(snapshotText); } catch (e) {}
+        } finally {
+            Compression.finalizeRun();
+        }
     }
 
     function extractStateSnapshot(events) {
+        if (typeof events === "string") {
+            const m = events.match(new RegExp(getSnapshotRegex(), "s")) || events.match(new RegExp(DEFAULT_SNAPSHOT_REGEX, "s"));
+            return m ? m[0].trim() : events.trim();
+        }
         const fullText = collectModelOutputText(events);
         if (!fullText) return null;
         const pattern = getSnapshotRegex();
@@ -734,17 +784,29 @@ The structure MUST be strictly as follows:
         return match ? decodeURIComponent(match[1]) : "";
     }
 
+    function rememberGoogleApiKeyFromRequest(request) {
+        try {
+            const keyFromHeader = request.headers.get("x-goog-api-key");
+            if (keyFromHeader) {
+                state.googleApiKey = keyFromHeader.trim();
+                return;
+            }
+            const urlObj = new URL(request.url);
+            const keyFromQuery = urlObj.searchParams.get("key");
+            if (keyFromQuery) state.googleApiKey = keyFromQuery.trim();
+        } catch (e) {}
+    }
+
     function rememberGoogleApiKey(headers, sourceUrl = "") {
-        const key = headers?.["x-goog-api-key"] || "";
-        if (key) {
-            state.googleApiKey = key.trim();
-            state.googleApiKeyUpdatedAt = Date.now();
-        }
+        if (!headers) return;
+        const normalized = {};
+        for (const [k, v] of Object.entries(headers)) normalized[k.toLowerCase()] = v;
+        const key = normalized["x-goog-api-key"] || "";
+        if (key) state.googleApiKey = String(key).trim();
     }
 
     function getGoogleApiKey() {
-        if (!state.googleApiKey) throw new Error("API key not captured yet");
-        return state.googleApiKey;
+        return state.googleApiKey || "";
     }
 
     async function buildSapisidAuthHeader() {
@@ -983,95 +1045,62 @@ The structure MUST be strictly as follows:
     };
 
     // ---------------------------
-    // UI module（PC 专属：完美匹配 Angular 工具栏）
+    // UI module
     // ---------------------------
 
     const UI = {
         init() {
-            UI.injectButton();
-            window.addEventListener("DOMContentLoaded", () => UI.injectButton());
-            window.addEventListener("load", () => UI.injectButton());
-            const observer = new MutationObserver(() => UI.injectButton());
+            const run = () => UI.injectButton();
+            run();
+            window.addEventListener("DOMContentLoaded", run);
+            window.addEventListener("load", run);
 
-            function startObserver() {
-                for (const doc of UI.getCandidateDocuments()) {
-                    if (doc.body) observer.observe(doc.body, { childList: true, subtree: true });
+            const startObserver = () => {
+                if (document.body) {
+                    const observer = new MutationObserver(run);
+                    observer.observe(document.body, { childList: true, subtree: true });
                 }
-            }
-            if (document.readyState === "loading") {
-                document.addEventListener("DOMContentLoaded", startObserver, { once: true });
-            } else {
-                startObserver();
-            }
-            setInterval(() => UI.injectButton(), 2000);
+            };
+            if (document.body) startObserver();
+            else document.addEventListener("DOMContentLoaded", startObserver);
+
+            setInterval(run, 1500);
         },
 
         injectButton() {
-            if (!window.location.href.includes(Config.UI.TARGET_PATH)) return;
             for (const doc of UI.getCandidateDocuments()) {
-                if (doc.getElementById(Config.UI.BUTTON_ID)) return;
-                const toolbar = UI.findToolbar(doc);
-                if (!toolbar) continue;
-                const button = UI.createButton(doc);
-                const moreButton = toolbar.querySelector(
-                    'button[iconname="more_vert"], button[aria-label="View more actions"], button[aria-label="More actions"], button[aria-label="More options"]'
-                );
-                let referenceNode = null;
-                if (moreButton) {
-                    referenceNode = (moreButton.parentElement === toolbar) ? moreButton : moreButton.parentElement;
+                if (!doc?.body) continue;
+                UI.ensureStyles(doc);
+
+                if (!doc.getElementById(Config.UI.BUTTON_ID)) {
+                    const toolbar = UI.findToolbar(doc);
+                    if (toolbar) {
+                        const button = UI.createButton(doc);
+                        toolbar.appendChild(button);
+                    }
                 }
-                if (referenceNode) {
-                    toolbar.insertBefore(button, referenceNode);
-                } else {
-                    toolbar.appendChild(button);
-                }
-                return;
             }
         },
 
         findToolbar(doc) {
             for (const selector of Config.UI.TOOLBAR_SELECTORS) {
-                const nodes = Array.from(doc.querySelectorAll(selector));
-                for (const node of nodes) {
-                    if (UI.isToolbarCandidate(node)) return node;
-                }
+                const node = doc.querySelector(selector);
+                if (node) return node;
             }
             return null;
         },
 
-        isToolbarCandidate(node) {
-            if (!node || typeof node.querySelector !== "function") return false;
-            return Boolean(
-                node.querySelector('button[iconname="more_vert"], button[aria-label*="actions"]') ||
-                node.querySelector('button[aria-label="Toggle run settings panel"]') ||
-                node.querySelector('button[aria-label="New chat"]')
-            );
-        },
-
-        // PC 专属：严谨绑定 Angular Material 样式与类名
-        createButton(doc = document) {
-            UI.ensureStyles(doc);
+        createButton(doc) {
             const button = doc.createElement("button");
             button.id = Config.UI.BUTTON_ID;
-            button.title = "Compress Chat History (一键压缩会话)";
-            button.setAttribute("ms-button", "");
-            button.setAttribute("variant", "icon-borderless");
-            button.setAttribute("mattooltip", "Compress Chat History");
-            button.setAttribute("mattooltipposition", "below");
-            button.setAttribute("iconname", "summarize");
-            button.className = "mat-mdc-tooltip-trigger ms-button-borderless ms-button-icon";
+            button.title = "Compress Chat History";
+            button.className = "ms-button-icon";
             button.type = "button";
-            button.addEventListener("click", Compression.run);
-
-            const iconSpan = doc.createElement("span");
-            iconSpan.className = "material-symbols-outlined notranslate ms-button-icon-symbol compressor-icon";
-            iconSpan.textContent = "docs";
-            button.appendChild(iconSpan);
-
-            const spinnerSpan = doc.createElement("span");
-            spinnerSpan.className = "compressor-spinner";
-            button.appendChild(spinnerSpan);
-
+            button.addEventListener("click", () => Compression.run());
+            button.innerHTML = `
+                <span class="material-symbols-outlined notranslate compressor-icon">docs</span>
+                <span class="compressor-spinner"></span>
+            `;
             return button;
         },
 
@@ -1086,36 +1115,16 @@ The structure MUST be strictly as follows:
     100% { transform: rotate(360deg); }
 }
 #${Config.UI.BUTTON_ID} {
-    position: relative;
-    width: 36px !important;
-    min-width: 36px !important;
-    height: 36px !important;
-    padding: 6px !important;
-    border-radius: 18px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border: none;
-    background: transparent;
+    width: 36px !important; height: 36px !important; border: none; background: transparent; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
 }
 #${Config.UI.BUTTON_ID} .compressor-spinner {
-    box-sizing: border-box;
-    width: 20px;
-    height: 20px;
-    border: 2px solid rgba(0, 0, 0, 0.2);
-    border-top-color: currentColor;
-    border-radius: 50%;
-    animation: aistudio-compressor-spin 0.8s linear infinite;
-    display: none;
+    width: 18px; height: 18px; border: 2px solid rgba(0,0,0,0.2); border-top-color: currentColor;
+    border-radius: 50%; animation: aistudio-compressor-spin 0.8s linear infinite; display: none;
 }
-#${Config.UI.BUTTON_ID}.compressor-loading .compressor-spinner {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-}
-#${Config.UI.BUTTON_ID}.compressor-loading .compressor-icon {
-    display: none;
-}`;
+#${Config.UI.BUTTON_ID}.compressor-loading .compressor-spinner { display: block; }
+#${Config.UI.BUTTON_ID}.compressor-loading .compressor-icon { display: none; }
+`;
             (doc.head || doc.documentElement || doc.body)?.appendChild(style);
         },
 
@@ -1135,44 +1144,86 @@ The structure MUST be strictly as follows:
                     const btn = doc.querySelector(selector);
                     if (btn) return btn;
                 }
+                const allBtns = Array.from(doc.querySelectorAll("button"));
+                const runBtn = allBtns.find(b => (b.textContent || "").includes("Run") || (b.getAttribute("aria-label") || "").includes("Run"));
+                if (runBtn) return runBtn;
             }
             return null;
         },
 
         getCandidateDocuments() {
             const docs = [document];
-            const frameDoc = document.querySelector('iframe[src*="bscframe"]')?.contentDocument;
-            if (frameDoc && frameDoc !== document) docs.push(frameDoc);
+            try {
+                const frameDoc = document.querySelector('iframe[src*="bscframe"]')?.contentDocument;
+                if (frameDoc && frameDoc !== document) docs.push(frameDoc);
+            } catch (e) {}
             return docs;
         },
 
         setButtonLoading(isLoading) {
-            const button = UI.findButton();
-            if (!button) return;
-            if (isLoading) {
-                button.classList.add("compressor-loading");
-                button.setAttribute("disabled", "true");
-            } else {
-                button.classList.remove("compressor-loading");
-                button.removeAttribute("disabled");
-            }
-        },
-
-        findButton() {
-            for (const doc of UI.getCandidateDocuments()) {
-                const btn = doc.getElementById(Config.UI.BUTTON_ID);
-                if (btn) return btn;
-            }
-            return null;
+            const btn = document.getElementById(Config.UI.BUTTON_ID);
+            if (btn) btn.classList.toggle("compressor-loading", isLoading);
         }
     };
 
+    function extractMutationPromptId(root) {
+        const match = (root?.[0] || "").match(/(?:^|\/)prompts\/([^/?#]+)/);
+        return match ? match[1] : null;
+    }
+
+    function buildMutationThreadEntry(turn, sequence = 0) {
+        if (Array.isArray(turn?.entry) && turn.entry.length >= 33) {
+            const entry = deepClone(turn.entry);
+            entry[0] = turn?.text || "";
+            entry[8] = turn?.role === "model" ? "model" : "user";
+            if (Array.isArray(entry[21]) && typeof entry[21][0] === "string" && /(?:^|\/)prompts\//.test(entry[21][0])) {
+                entry[21] = null;
+            }
+            entry[32] = buildEntryTimestamp(sequence);
+            return entry;
+        }
+        return buildCreatePromptEntry(turn, sequence);
+    }
+
+    function buildCreatePromptEntry(turn, sequence = 0) {
+        const entry = new Array(33).fill(null);
+        entry[0] = turn?.text || "";
+        entry[8] = turn?.role === "model" ? "model" : "user";
+        entry[32] = buildEntryTimestamp(sequence);
+        return entry;
+    }
+
+    function buildEntryTimestamp(sequence = 0) {
+        const ts = Date.now() + Math.max(0, Number(sequence) || 0);
+        return [Math.floor(ts / 1000), (ts % 1000) * 1_000_000];
+    }
+
+    function deepClone(value) {
+        return value == null ? value : JSON.parse(JSON.stringify(value));
+    }
+
+    function safeParseJSON(text) {
+        try { return JSON.parse(text); } catch { return null; }
+    }
+
+    function buildSnippetVariants(snippet) {
+        if (!snippet) return [];
+        return [snippet, JSON.stringify(snippet).slice(1, -1)];
+    }
+
+    function matchByRegex(text, pattern) {
+        if (!pattern) return null;
+        try {
+            const res = text.match(new RegExp(pattern, "s"));
+            return res ? res[0] : null;
+        } catch { return null; }
+    }
+
     function bootstrap() {
-        installTopLevelHandlers();
-        registerMenuCommands();
-        installSettingsMessageBridge();
-        NetworkMonitor.init();
-        UI.init();
+        try { registerMenuCommands(); } catch (e) {}
+        try { installTopLevelHandlers(); } catch (e) {}
+        try { NetworkMonitor.init(); } catch (e) {}
+        try { UI.init(); } catch (e) {}
     }
 
     bootstrap();
