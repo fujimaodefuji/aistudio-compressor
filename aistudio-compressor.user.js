@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         AI Studio Chat Compressor
 // @namespace    https://fujimaodefuji.github.io/aistudio-compressor
-// @version      0.4.6
-// @description  在 Google AI Studio 提供一键压缩聊天记录、注入快照、监控 GenerateContent 请求的工具，完美兼容 Windows/Mac/iOS Safari Stay | Facilitating long conversation continuation and history migration
+// @version      0.4.5
+// @description  在 Google AI Studio 提供一键压缩聊天记录、注入快照、监控 GenerateContent 请求的工具，方便长对话续写与历史迁移 | Provides a one-click tool in Google AI Studio to compress chat history, inject snapshots, and monitor GenerateContent requests, facilitating long conversation continuation and history migration
 // @author       fujimaodefuji
 // @match        https://aistudio.google.com/*
 // @run-at       document-start
 // @grant        unsafeWindow
 // @grant        GM_registerMenuCommand
-// @grant        GM.registerMenuCommand
 // ==/UserScript==
 
 (function () {
@@ -148,24 +147,12 @@ The structure MUST be strictly as follows:
         }
     };
 
-    function getSafeTopWindow() {
-        try {
-            if (typeof unsafeWindow !== "undefined" && unsafeWindow && unsafeWindow.top) {
-                return unsafeWindow.top;
-            }
-        } catch (e) {}
-        try {
-            if (window.top) return window.top;
-        } catch (e) {}
-        return window;
-    }
-
     const env = {
         isMac: /Mac|iPhone|iPad/.test(navigator.platform),
-        get topWindow() { return getSafeTopWindow(); }
+        topWindow: unsafeWindow?.top || window
     };
-
-    const SCRIPT_VERSION = "0.4.6";
+    const settingsOrigin = getSettingsOrigin();
+    const SCRIPT_VERSION = "0.4.5";
 
     const state = {
         compressionInProgress: false,
@@ -255,10 +242,68 @@ The structure MUST be strictly as follows:
         state.activeCompressionSnippet = deriveSnippet(state.activeCompressionPrompt);
     }
 
+    function getSettingsOrigin() {
+        const url = Config.SETTINGS?.PAGE_URL;
+        if (!url) return null;
+        try { return new URL(url, location.href).origin; } catch { return null; }
+    }
+
+    function getSettingsSnapshot() {
+        return {
+            activePreset: userSettings?.activePreset || DEFAULT_SETTINGS.activePreset,
+            compressPrompt: userSettings?.compressPrompt || Config.PROMPTS.FULL,
+            ackMessage: userSettings?.ackMessage || DEFAULT_SETTINGS.ackMessage,
+            snapshotRegex: userSettings?.snapshotRegex || DEFAULT_SNAPSHOT_REGEX,
+            tailPercent: Number.isFinite(userSettings?.tailPercent) ? userSettings.tailPercent : DEFAULT_SETTINGS.tailPercent,
+            tailMinChars: Number.isFinite(userSettings?.tailMinChars) ? userSettings.tailMinChars : DEFAULT_SETTINGS.tailMinChars
+        };
+    }
+
+    function normalizeSettingsPayload(payload) {
+        if (!payload || typeof payload !== "object") return { ...DEFAULT_SETTINGS };
+        const next = { ...DEFAULT_SETTINGS };
+        if (typeof payload.activePreset === "string") next.activePreset = payload.activePreset;
+        if (typeof payload.compressPrompt === "string") next.compressPrompt = payload.compressPrompt.trim() || Config.PROMPTS.FULL;
+        if (typeof payload.ackMessage === "string") next.ackMessage = payload.ackMessage.trim() || DEFAULT_SETTINGS.ackMessage;
+        if (typeof payload.snapshotRegex === "string") next.snapshotRegex = payload.snapshotRegex.trim() || DEFAULT_SNAPSHOT_REGEX;
+        if (payload.tailPercent != null) {
+            const p = Number(payload.tailPercent);
+            if (Number.isFinite(p)) next.tailPercent = Math.min(Math.max(p, 0), 100);
+        }
+        if (payload.tailMinChars != null) {
+            const m = Number(payload.tailMinChars);
+            if (Number.isFinite(m) && m >= 0) next.tailMinChars = Math.floor(m);
+        }
+        return next;
+    }
+
+    function scheduleSettingsHydration(win) {
+        if (!win) return;
+        const targetOrigin = settingsOrigin || "*";
+        const message = { source: "aistudio-compressor", type: "hydrate", payload: getSettingsSnapshot() };
+        let attempts = 0;
+        const timer = setInterval(() => {
+            if (!win || win.closed || ++attempts >= 10) { clearInterval(timer); return; }
+            try { win.postMessage(message, targetOrigin); } catch (e) {}
+        }, 1200);
+    }
+
+    function installSettingsMessageBridge() {
+        window.addEventListener("message", event => {
+            if (!event?.data || event.data.source !== "aistudio-compressor") return;
+            if (settingsOrigin && event.origin !== settingsOrigin) return;
+            if (event.data.type === "update-settings" && event.data.payload) {
+                updateUserSettings(normalizeSettingsPayload(event.data.payload));
+                if (!state.compressionInProgress) refreshActivePromptFromSettings();
+            }
+        });
+    }
+
     function openSettingsWindow() {
         const targetUrl = Config.SETTINGS?.PAGE_URL;
         if (!targetUrl) return alert("未配置设置页面 URL。");
-        window.open(targetUrl, "aistudio_compressor_settings", "width=750,height=800,resizable=yes,scrollbars=yes");
+        const win = window.open(targetUrl, "aistudio_compressor_settings", "width=750,height=800,resizable=yes,scrollbars=yes");
+        scheduleSettingsHydration(win);
     }
 
     function resetSettingsToDefault() {
@@ -269,59 +314,38 @@ The structure MUST be strictly as follows:
         alert("已恢复默认设置。");
     }
 
-    // 核心优化 1：最高优先级注册菜单
     function registerMenuCommands() {
-        const reg = (caption, fn) => {
-            try {
-                if (typeof GM_registerMenuCommand === "function") {
-                    GM_registerMenuCommand(caption, fn);
-                } else if (typeof GM !== "undefined" && GM && typeof GM.registerMenuCommand === "function") {
-                    GM.registerMenuCommand(caption, fn);
-                }
-            } catch (err) {}
-        };
-
-        reg("⚡ 立即压缩当前会话 (Run Compression)", () => Compression.run());
-        reg("⚙️ 打开 Compressor 设置...", () => openSettingsWindow());
-        reg("♻️ 重置 Compressor 设置", () => resetSettingsToDefault());
+        if (typeof GM_registerMenuCommand !== "function") return;
+        // 手机端 Stay 点击 [☰ 菜单] 直接触发压缩！
+        GM_registerMenuCommand("⚡ 立即压缩当前会话 (Run Compression)", Compression.run);
+        GM_registerMenuCommand("⚙️ 打开 Compressor 设置...", openSettingsWindow);
+        GM_registerMenuCommand("♻️ 重置 Compressor 设置", resetSettingsToDefault);
     }
 
     function installTopLevelHandlers() {
-        try {
-            const topWin = env.topWindow;
-            if (!topWin.__aistudio_compressor_handlers_installed) {
-                topWin.addEventListener(Config.EVENTS.REQUEST, Compression.handleRequestEvent);
-                topWin.addEventListener(Config.EVENTS.RESPONSE, Compression.handleResponseEvent);
-                topWin.__aistudio_compressor_handlers_installed = true;
-            }
-        } catch (e) {
-            window.addEventListener(Config.EVENTS.REQUEST, Compression.handleRequestEvent);
-            window.addEventListener(Config.EVENTS.RESPONSE, Compression.handleResponseEvent);
+        if (!env.topWindow.__aistudio_compressor_handlers_installed) {
+            env.topWindow.addEventListener(Config.EVENTS.REQUEST, Compression.handleRequestEvent);
+            env.topWindow.addEventListener(Config.EVENTS.RESPONSE, Compression.handleResponseEvent);
+            env.topWindow.__aistudio_compressor_handlers_installed = true;
         }
     }
 
     function emitNetworkEvent(name, detail) {
-        try {
-            env.topWindow.dispatchEvent(new CustomEvent(name, { detail }));
-        } catch (err) {
-            try { window.dispatchEvent(new CustomEvent(name, { detail })); } catch (e) {}
-        }
+        try { env.topWindow.dispatchEvent(new CustomEvent(name, { detail })); } catch (err) {}
     }
 
     const NetworkMonitor = {
         init() {
-            try {
-                hookContext(window);
-                window.addEventListener("DOMContentLoaded", () => hookContext(window));
-                window.addEventListener("load", () => hookContext(window));
-            } catch (e) {}
+            hookContext(window);
+            window.addEventListener("DOMContentLoaded", () => hookContext(window));
+            window.addEventListener("load", () => hookContext(window));
         }
     };
 
     function hookContext(ctx) {
         if (!ctx) return;
-        try { installFetchHook(ctx); } catch (e) {}
-        try { installXHRHook(ctx); } catch (e) {}
+        installFetchHook(ctx);
+        installXHRHook(ctx);
     }
 
     function installFetchHook(ctx) {
@@ -360,12 +384,9 @@ The structure MUST be strictly as follows:
             return response;
         };
         ctx.__aistudio_compressor_fetch_hooked = true;
-
-        try {
-            if (typeof unsafeWindow !== "undefined" && unsafeWindow && ctx !== unsafeWindow) {
-                unsafeWindow.fetch = ctx.fetch;
-            }
-        } catch (e) {}
+        if (ctx !== unsafeWindow && typeof unsafeWindow.fetch === "function") {
+            unsafeWindow.fetch = ctx.fetch;
+        }
     }
 
     function installXHRHook(ctx) {
@@ -420,12 +441,6 @@ The structure MUST be strictly as follows:
         }
         ctx.XMLHttpRequest = WrappedXHR;
         ctx.__aistudio_compressor_xhr_hooked = true;
-
-        try {
-            if (typeof unsafeWindow !== "undefined" && unsafeWindow && ctx !== unsafeWindow) {
-                unsafeWindow.XMLHttpRequest = WrappedXHR;
-            }
-        } catch (e) {}
     }
 
     function resolveUrl(url) {
@@ -997,23 +1012,15 @@ The structure MUST be strictly as follows:
 
     const UI = {
         init() {
-            const run = () => {
-                UI.injectButton();
-            };
-            run();
-            window.addEventListener("DOMContentLoaded", run);
-            window.addEventListener("load", run);
-
-            const startObserver = () => {
-                if (document.body) {
-                    const observer = new MutationObserver(run);
-                    observer.observe(document.body, { childList: true, subtree: true });
-                }
-            };
-            if (document.body) startObserver();
-            else document.addEventListener("DOMContentLoaded", startObserver);
-
-            setInterval(run, 1500);
+            UI.injectButton();
+            window.addEventListener("DOMContentLoaded", () => UI.injectButton());
+            window.addEventListener("load", () => UI.injectButton());
+            const observer = new MutationObserver(() => UI.injectButton());
+            if (document.body) observer.observe(document.body, { childList: true, subtree: true });
+            else document.addEventListener("DOMContentLoaded", () => {
+                if (document.body) observer.observe(document.body, { childList: true, subtree: true });
+            });
+            setInterval(() => UI.injectButton(), 1500);
         },
 
         injectButton() {
@@ -1021,6 +1028,7 @@ The structure MUST be strictly as follows:
                 if (!doc?.body) continue;
                 UI.ensureStyles(doc);
 
+                // 1. 宽屏挂载工具栏
                 if (!doc.getElementById(Config.UI.BUTTON_ID)) {
                     const toolbar = UI.findToolbar(doc);
                     if (toolbar) {
@@ -1029,6 +1037,7 @@ The structure MUST be strictly as follows:
                     }
                 }
 
+                // 2. 任何手机 / 触屏设备 / 窄屏，强制注入右下角悬浮压缩球（FAB）
                 if (!doc.getElementById(Config.UI.FAB_ID)) {
                     const fab = UI.createMobileFab(doc);
                     doc.body.appendChild(fab);
@@ -1050,7 +1059,7 @@ The structure MUST be strictly as follows:
             button.title = "Compress Chat History";
             button.className = "ms-button-icon";
             button.type = "button";
-            button.addEventListener("click", () => Compression.run());
+            button.addEventListener("click", Compression.run);
             button.innerHTML = `
                 <span class="material-symbols-outlined notranslate compressor-icon">docs</span>
                 <span class="compressor-spinner"></span>
@@ -1067,7 +1076,7 @@ The structure MUST be strictly as follows:
                 <span class="fab-icon">⚡</span>
                 <span class="fab-spinner"></span>
             `;
-            fab.addEventListener("click", () => Compression.run());
+            fab.addEventListener("click", Compression.run);
             return fab;
         },
 
@@ -1092,6 +1101,7 @@ The structure MUST be strictly as follows:
 #${Config.UI.BUTTON_ID}.compressor-loading .compressor-spinner { display: block; }
 #${Config.UI.BUTTON_ID}.compressor-loading .compressor-icon { display: none; }
 
+/* 手机端悬浮球：高亮紫蓝渐变，绝对置顶于右下角 */
 #${Config.UI.FAB_ID} {
     position: fixed !important;
     right: 20px !important;
@@ -1143,10 +1153,8 @@ The structure MUST be strictly as follows:
 
         getCandidateDocuments() {
             const docs = [document];
-            try {
-                const frameDoc = document.querySelector('iframe[src*="bscframe"]')?.contentDocument;
-                if (frameDoc && frameDoc !== document) docs.push(frameDoc);
-            } catch (e) {}
+            const frameDoc = document.querySelector('iframe[src*="bscframe"]')?.contentDocument;
+            if (frameDoc && frameDoc !== document) docs.push(frameDoc);
             return docs;
         },
 
@@ -1211,11 +1219,13 @@ The structure MUST be strictly as follows:
         } catch { return null; }
     }
 
+    // 核心重构：无条件直接执行 UI 初始化，彻底移除原作者的 isAppContext 拦截！
     function bootstrap() {
-        try { registerMenuCommands(); } catch (e) {}
-        try { installTopLevelHandlers(); } catch (e) {}
-        try { NetworkMonitor.init(); } catch (e) {}
-        try { UI.init(); } catch (e) {}
+        installTopLevelHandlers();
+        registerMenuCommands();
+        installSettingsMessageBridge();
+        NetworkMonitor.init();
+        UI.init();
     }
 
     bootstrap();
