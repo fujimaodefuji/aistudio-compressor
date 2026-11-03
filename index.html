@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <title>AI Studio Compressor 设置 (v0.4.2)</title>
+  <title>AI Studio Compressor 设置 (v0.4.3)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
@@ -240,7 +240,7 @@
 <div class="container">
   <header>
     <h1>AI Studio Compressor 控制台</h1>
-    <p>轻松管理记忆快照模板与应答策略 (v0.4.2)</p>
+    <p>轻松管理记忆快照模板与应答策略 (v0.4.3)</p>
   </header>
 
   <div id="opener-notice" class="notice-banner">
@@ -279,8 +279,8 @@
 
       <div>
         <label>快照提取正则 (Snapshot Regex)</label>
-        <div class="description">留空则自动截取整个回复。</div>
-        <input id="field-regex" name="snapshotRegex" type="text" placeholder="<state_snapshot>[\s\S]*?</state_snapshot>" />
+        <div class="description">默认已内置精准匹配，自动切除前置草稿，仅保留纯净 XML 记忆块。</div>
+        <input id="field-regex" name="snapshotRegex" type="text" />
       </div>
     </div>
 
@@ -314,6 +314,8 @@
 </div>
 
 <script>
+  const DEFAULT_SNAPSHOT_REGEX = "<state_snapshot>[\\s\\S]*?<\\/state_snapshot>";
+
   const PRESETS = {
     coding: `That concludes the above topic. Please remember the chat history and switch roles:
 
@@ -398,7 +400,7 @@ The structure MUST be strictly as follows:
     activePreset: "narrative",
     compressPrompt: PRESETS.narrative,
     ackMessage: "（已同步最新状态与记忆快照，随时可以继续。）",
-    snapshotRegex: "",
+    snapshotRegex: DEFAULT_SNAPSHOT_REGEX,
     tailPercent: 30,
     tailMinChars: 2000
   };
@@ -452,7 +454,7 @@ The structure MUST be strictly as follows:
     presetSelect.value = settings.activePreset || "narrative";
     promptField.value = settings.compressPrompt;
     ackField.value = settings.ackMessage || DEFAULT_SETTINGS.ackMessage;
-    regexField.value = settings.snapshotRegex || "";
+    regexField.value = settings.snapshotRegex || DEFAULT_SNAPSHOT_REGEX;
     percentField.value = settings.tailPercent;
     minCharsField.value = settings.tailMinChars;
   }
@@ -485,7 +487,7 @@ The structure MUST be strictly as follows:
       activePreset: presetSelect.value,
       compressPrompt: promptField.value.trim() || DEFAULT_SETTINGS.compressPrompt,
       ackMessage: ackField.value.trim() || DEFAULT_SETTINGS.ackMessage,
-      snapshotRegex: regexField.value.trim(),
+      snapshotRegex: regexField.value.trim() || DEFAULT_SNAPSHOT_REGEX,
       tailPercent: normalizedPercent,
       tailMinChars: normalizedMinChars
     };

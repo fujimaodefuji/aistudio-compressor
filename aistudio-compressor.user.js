@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AI Studio Chat Compressor
 // @namespace    https://fujimaodefuji.github.io/aistudio-compressor
-// @version      0.4.2
+// @version      0.4.3
 // @description  在 Google AI Studio 提供一键压缩聊天记录、注入快照、监控 GenerateContent 请求的工具，方便长对话续写与历史迁移 | Provides a one-click tool in Google AI Studio to compress chat history, inject snapshots, and monitor GenerateContent requests, facilitating long conversation continuation and history migration
 // @author       fujimaodefuji
 // @match        https://aistudio.google.com/*
@@ -16,6 +16,8 @@
   // ---------------------------
   // Constants & environment
   // ---------------------------
+
+  const DEFAULT_SNAPSHOT_REGEX = "<state_snapshot>[\\s\\S]*?<\\/state_snapshot>";
 
   const PRESET_PROMPTS = {
     coding: `That concludes the above topic. Please remember the chat history and switch roles:
@@ -153,7 +155,7 @@ The structure MUST be strictly as follows:
     topWindow: unsafeWindow?.top || window
   };
   const settingsOrigin = getSettingsOrigin();
-  const SCRIPT_VERSION = "0.4.2";
+  const SCRIPT_VERSION = "0.4.3";
 
   const state = {
     compressionInProgress: false,
@@ -180,12 +182,11 @@ The structure MUST be strictly as follows:
   };
 
   const STORAGE_KEY = "__aistudio_compressor_settings_v1";
-  // 默认值全部固化为优化后的叙事记忆版本
   const DEFAULT_SETTINGS = {
     activePreset: "narrative",
     compressPrompt: PRESET_PROMPTS.narrative,
     ackMessage: "（已同步最新状态与记忆快照，随时可以继续。）",
-    snapshotRegex: "",
+    snapshotRegex: DEFAULT_SNAPSHOT_REGEX,
     tailPercent: 30,
     tailMinChars: 2000
   };
@@ -202,7 +203,6 @@ The structure MUST be strictly as follows:
       }
       return { ...DEFAULT_SETTINGS };
     } catch (err) {
-      console.warn(Config.TAGS.NET, "Failed to load compressor settings", err);
       return { ...DEFAULT_SETTINGS };
     }
   }
@@ -210,9 +210,7 @@ The structure MUST be strictly as follows:
   function persistUserSettings() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(userSettings));
-    } catch (err) {
-      console.warn(Config.TAGS.NET, "Failed to store compressor settings", err);
-    }
+    } catch (err) {}
   }
 
   function updateUserSettings(partial) {
@@ -229,7 +227,7 @@ The structure MUST be strictly as follows:
   }
 
   function getSnapshotRegex() {
-    return (userSettings?.snapshotRegex || "").trim();
+    return (userSettings?.snapshotRegex || "").trim() || DEFAULT_SNAPSHOT_REGEX;
   }
 
   function getTailRetentionConfig() {
@@ -266,7 +264,7 @@ The structure MUST be strictly as follows:
       activePreset: userSettings?.activePreset || DEFAULT_SETTINGS.activePreset,
       compressPrompt: userSettings?.compressPrompt || Config.PROMPTS.FULL,
       ackMessage: userSettings?.ackMessage || DEFAULT_SETTINGS.ackMessage,
-      snapshotRegex: userSettings?.snapshotRegex || "",
+      snapshotRegex: userSettings?.snapshotRegex || DEFAULT_SNAPSHOT_REGEX,
       tailPercent: Number.isFinite(userSettings?.tailPercent) ? userSettings.tailPercent : DEFAULT_SETTINGS.tailPercent,
       tailMinChars: Number.isFinite(userSettings?.tailMinChars) ? userSettings.tailMinChars : DEFAULT_SETTINGS.tailMinChars
     };
@@ -288,7 +286,7 @@ The structure MUST be strictly as follows:
       next.ackMessage = payload.ackMessage.trim() || DEFAULT_SETTINGS.ackMessage;
     }
     if (typeof payload.snapshotRegex === "string") {
-      next.snapshotRegex = payload.snapshotRegex.trim();
+      next.snapshotRegex = payload.snapshotRegex.trim() || DEFAULT_SNAPSHOT_REGEX;
     }
     if (payload.tailPercent != null) {
       const parsedPercent = Number(payload.tailPercent);
@@ -399,9 +397,7 @@ The structure MUST be strictly as follows:
   function emitNetworkEvent(name, detail) {
     try {
       env.topWindow.dispatchEvent(new CustomEvent(name, { detail }));
-    } catch (err) {
-      log.net("Failed to dispatch network event", name, err);
-    }
+    } catch (err) {}
   }
 
   // ---------------------------
@@ -846,14 +842,23 @@ The structure MUST be strictly as follows:
     });
   }
 
+  // 关键升级：内置优先截取 <state_snapshot>，自动剔除前置思考草稿
   function extractStateSnapshot(events) {
     const fullText = collectModelOutputText(events);
     if (!fullText) return null;
+
     const pattern = getSnapshotRegex();
     if (pattern) {
       const matched = matchByRegex(fullText, pattern);
-      if (matched) return matched;
+      if (matched) return matched.trim();
     }
+
+    // 智能兜底：如果用户正则没生效，自动尝试提取 <state_snapshot>
+    const fallbackMatch = matchByRegex(fullText, DEFAULT_SNAPSHOT_REGEX);
+    if (fallbackMatch) {
+      return fallbackMatch.trim();
+    }
+
     return fullText.trim();
   }
 
