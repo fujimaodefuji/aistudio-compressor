@@ -1,12 +1,11 @@
 // ==UserScript==
 // @name         AI Studio Chat Compressor (iOS)
 // @namespace    https://fujimaodefuji.github.io/aistudio-compressor
-// @version      1.0.0-ios
-// @description  在 Google AI Studio 提供一键压缩聊天记录 (iOS 移动专版) | 专为 Safari 优化防死锁与点赞判定
+// @version      1.0.2-ios
+// @description  在 Google AI Studio 提供一键压缩聊天记录 (iOS 移动专版) | 主世界头信息全量克隆，彻底解决无 Key 报 403 无法派生分支的问题
 // @author       fujimaodefuji
 // @match        https://aistudio.google.com/*
 // @run-at       document-start
-// @grant        unsafeWindow
 // @grant        GM_registerMenuCommand
 // @grant        GM.registerMenuCommand
 // ==/UserScript==
@@ -16,34 +15,8 @@
 
   const DEFAULT_SNAPSHOT_REGEX = "<state_snapshot>[\\s\\S]*?<\\/state_snapshot>";
 
-  const Config = {
-    TARGETS: {
-      GENERATE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
-      RESOLVE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ResolveDriveResource",
-      CREATE_PROMPT: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/CreatePrompt"
-    },
-    NETWORK: { RPC_ORIGIN: "https://alkalimakersuite-pa.clients6.google.com" },
-    UI: {
-      BUTTON_ID: "compressor-button-ios",
-      TOOLBAR_SELECTORS: [
-        "ms-toolbar .toolbar-right",
-        "ms-playground-toolbar .toolbar-right",
-        ".toolbar-right",
-        "header .right-actions"
-      ],
-      INPUT_SELECTORS: [
-        "ms-autosize-textarea textarea",
-        'textarea[aria-label="Start typing a prompt"]',
-        "textarea"
-      ],
-      SEND_BUTTON_SELECTORS: [
-        "ms-run-button button",
-        'button[aria-label="Run"]',
-        'button[aria-label^="Run"]'
-      ]
-    },
-    PROMPTS: {
-      NARRATIVE: `That concludes the current topic. Please remember the conversation history and switch roles:
+  const PRESET_PROMPTS = {
+    narrative: `That concludes the current topic. Please remember the conversation history and switch roles:
 
 You are the Narrative & Context State Compressor for an ongoing interactive roleplay and relationship dialogue.
 When conversation history grows too large, your task is to distill the dynamic context, emotional tone, physical scene, and unresolved plotlines into a concise, structured XML snapshot: <state_snapshot>.
@@ -80,14 +53,44 @@ The structure MUST be strictly as follows:
 <immediate_next_steps>
 [压缩发生瞬间，双方正悬停在哪个对话话题、待完成的身体动作或下一步行动]
 </immediate_next_steps>
-</state_snapshot>`,
+</state_snapshot>`
+  };
+
+  const Config = {
+    TARGETS: {
+      GENERATE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
+      RESOLVE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ResolveDriveResource",
+      CREATE_PROMPT: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/CreatePrompt"
+    },
+    NETWORK: { RPC_ORIGIN: "https://alkalimakersuite-pa.clients6.google.com" },
+    UI: {
+      BUTTON_ID: "compressor-button-ios",
+      TOOLBAR_SELECTORS: [
+        "ms-toolbar .toolbar-right",
+        "ms-playground-toolbar .toolbar-right",
+        ".toolbar-right",
+        "header .right-actions"
+      ],
+      INPUT_SELECTORS: [
+        "ms-autosize-textarea textarea",
+        'textarea[aria-label="Start typing a prompt"]',
+        "textarea"
+      ],
+      SEND_BUTTON_SELECTORS: [
+        "ms-run-button button",
+        'button[aria-label="Run"]',
+        'button[aria-label^="Run"]'
+      ]
+    },
+    PROMPTS: {
+      NARRATIVE: PRESET_PROMPTS.narrative,
       ACK: "（已同步最新状态与记忆快照，随时可以继续。）"
     }
   };
 
   const state = {
     compressionInProgress: false,
-    googleApiKey: "",
+    capturedHeaders: {}, // 核心：存储全量克隆的合法请求头
     lastResolvedPromptThread: null,
     lastResolvedPromptRoot: null,
     lastResolvedPromptId: null
@@ -96,55 +99,98 @@ The structure MUST be strictly as follows:
   let domWatchInterval = null;
   let initialThumbCount = 0;
 
-  function getCookieValue(name) {
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const match = document.cookie.match(new RegExp(`(?:^|; )${escaped}=([^;]*)`));
-    return match ? decodeURIComponent(match[1]) : "";
+  // =========================================================================
+  // 黑魔法：主世界注入（Main-World Injection）突破苹果沙箱拦截
+  // 直接把原网页真实发出的合法请求 Headers 偷下来
+  // =========================================================================
+  function injectNetworkMonitorToMainWorld() {
+    const script = document.createElement('script');
+    script.textContent = `
+            (function() {
+                // 1. 劫持原生 Fetch
+                const origFetch = window.fetch;
+                window.fetch = async function(...args) {
+                    try {
+                        const req = new Request(args[0], args[1]);
+                        const url = req.url || "";
+                        if (url.includes('GenerateContent') || url.includes('CreatePrompt') || url.includes('ResolveDriveResource')) {
+                            const headersObj = {};
+                            req.headers.forEach((value, key) => {
+                                if (key.toLowerCase() !== 'content-length') {
+                                    headersObj[key] = value;
+                                }
+                            });
+                            // 偷取完整 Headers 并传回插件层
+                            if (Object.keys(headersObj).length > 0) {
+                                window.postMessage({ type: 'COMP_HEADERS_CAPTURED', data: headersObj }, '*');
+                            }
+                        }
+                    } catch(e) {}
+
+                    const res = await origFetch.apply(this, args);
+
+                    try {
+                        const urlStr = (args[0] && typeof args[0] === 'string') ? args[0] : (args[0] && args[0].url ? args[0].url : "");
+                        if (urlStr.includes('ResolveDriveResource')) {
+                            res.clone().text().then(text => {
+                                window.postMessage({ type: 'COMP_RESOLVE_DATA', data: text }, '*');
+                            }).catch(()=>{});
+                        }
+                    } catch(e) {}
+                    return res;
+                };
+
+                // 2. 劫持原生 XHR（防漏兜底）
+                const origXHR = window.XMLHttpRequest;
+                window.XMLHttpRequest = function() {
+                    const xhr = new origXHR();
+                    let url = '';
+                    let reqHeaders = {};
+
+                    const origOpen = xhr.open;
+                    xhr.open = function(...a) { url = a[1] || ''; return origOpen.apply(this, a); };
+
+                    const origSetHeader = xhr.setRequestHeader;
+                    xhr.setRequestHeader = function(name, val) {
+                        if (name.toLowerCase() !== 'content-length') reqHeaders[name] = val;
+                        return origSetHeader.apply(this, arguments);
+                    };
+
+                    const origSend = xhr.send;
+                    xhr.send = function(...a) {
+                        if (url.includes('GenerateContent') || url.includes('CreatePrompt') || url.includes('ResolveDriveResource')) {
+                            if (Object.keys(reqHeaders).length > 0) {
+                                window.postMessage({ type: 'COMP_HEADERS_CAPTURED', data: reqHeaders }, '*');
+                            }
+                        }
+                        return origSend.apply(this, a);
+                    };
+
+                    xhr.addEventListener('load', function() {
+                        if (url.includes('ResolveDriveResource')) {
+                            window.postMessage({ type: 'COMP_RESOLVE_DATA', data: xhr.responseText }, '*');
+                        }
+                    });
+                    return xhr;
+                };
+            })();
+        `;
+    (document.head || document.documentElement).appendChild(script);
+    script.remove();
   }
 
-  async function buildSapisidAuthHeader() {
-    const sapisid = getCookieValue("SAPISID") || getCookieValue("__Secure-3PAPISID") || getCookieValue("APISID");
-    if (!sapisid || !globalThis.crypto?.subtle) return null;
-    const ts = Math.floor(Date.now() / 1000);
-    const encoder = new TextEncoder();
-    const digest = await globalThis.crypto.subtle.digest("SHA-1", encoder.encode(`${ts} ${sapisid} ${location.origin}`));
-    const hash = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, "0")).join("");
-    return `SAPISIDHASH ${ts}_${hash} SAPISID1PHASH ${ts}_${hash} SAPISID3PHASH ${ts}_${hash}`;
-  }
-
-  function rememberGoogleApiKey(headers) {
-    if (!headers) return;
-    const normalized = {};
-    for (const [k, v] of Object.entries(headers)) normalized[k.toLowerCase()] = v;
-    if (normalized["x-goog-api-key"]) state.googleApiKey = String(normalized["x-goog-api-key"]).trim();
-  }
-
-  const NetworkMonitor = {
-    init() {
-      try {
-        if (typeof window.fetch === "function" && !window.__ios_compressor_hooked) {
-          const origFetch = window.fetch;
-          window.fetch = async function (input, init = {}) {
-            const req = input instanceof Request ? input : new Request(input, init);
-            if (req.url.includes(Config.TARGETS.GENERATE)) {
-              try {
-                const headers = Object.fromEntries(req.headers.entries());
-                rememberGoogleApiKey(headers);
-              } catch (e) {}
-            }
-            const res = await origFetch(request);
-            if (req.url.includes(Config.TARGETS.RESOLVE)) {
-              try {
-                res.clone().text().then(txt => maybeCaptureResolvedPromptThread(txt));
-              } catch (e) {}
-            }
-            return res;
-          };
-          window.__ios_compressor_hooked = true;
-        }
-      } catch (e) {}
+  // 接收主世界传回的关键数据
+  window.addEventListener('message', e => {
+    if (!e.data) return;
+    if (e.data.type === 'COMP_HEADERS_CAPTURED') {
+      state.capturedHeaders = { ...state.capturedHeaders, ...e.data.data };
     }
-  };
+    if (e.data.type === 'COMP_RESOLVE_DATA') {
+      maybeCaptureResolvedPromptThread(e.data.data);
+    }
+  });
+
+  // =========================================================================
 
   function safeParseJSON(text) {
     try { return JSON.parse(text); } catch { return null; }
@@ -230,13 +276,17 @@ The structure MUST be strictly as follows:
       }
       if (!textarea) return alert("未找到输入框！");
 
+      // 安全预检：确保已经偷取到了合法头信息
+      if (Object.keys(state.capturedHeaders).length === 0) {
+        alert("🔒 环境安全锁拦截：\n\n请先在当前对话框随便发送一句任意消息（如打个句号）。\n我们需要拦截一次正常通信以获取合法的免登录凭据（Headers），这是避免派生报错的必需步骤！\n\n待模型回复完毕后，再点击本按钮。");
+        return;
+      }
+
       state.compressionInProgress = true;
       UI.setLoading(true);
 
-      // iOS核心：发送前记录点赞数
       initialThumbCount = countThumbIcons();
 
-      // 写入预设并发送
       const desc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
       if (desc?.set) desc.set.call(textarea, Config.PROMPTS.NARRATIVE);
       else textarea.value = Config.PROMPTS.NARRATIVE;
@@ -276,7 +326,6 @@ The structure MUST be strictly as follows:
 
         if (currentThumbs > initialThumbCount) seenNewTurn = true;
 
-        // 核心：点赞出现且Stop消失，说明真停笔
         if (!isStopVisible && (seenNewTurn || checks > 10)) {
           const snapshot = extractSnapshotFromLatestModelTurn();
           if (snapshot) {
@@ -311,7 +360,7 @@ The structure MUST be strictly as follows:
       }
       if (!target) return null;
       const turnText = target.innerText || "";
-      if (turnText.includes("[记录压缩前") || turnText.includes("switch roles:")) return null; // 过滤提示词
+      if (turnText.includes("[记录压缩前") || turnText.includes("switch roles:")) return null;
       const match = turnText.match(/<state_snapshot>[\s\S]*?<\/state_snapshot>/i);
       return match ? match[0].trim() : null;
     } catch (e) { return null; }
@@ -329,8 +378,11 @@ The structure MUST be strictly as follows:
         turns = await fetchAndExtractTurns(currentId);
       }
 
+      // 剔除压缩提示词和快照所在的旧记录
       const sanitized = turns.filter(t => !t.text.includes("Narrative & Context State Compressor") && !t.text.includes("<state_snapshot>"));
-      const preserved = sanitized.slice(-6); // 简单保留最后6条交互
+
+      // 严谨保留尾部对话（防止截断，默认为原功能算法的简化版，只拿最后8-10轮以避免 Token 超标）
+      const preserved = sanitized.slice(-8);
 
       const newTurns = [
         { role: "user", text: snapshotText },
@@ -339,25 +391,36 @@ The structure MUST be strictly as follows:
       ];
 
       const body = buildCreatePayload(newTurns);
-      if (!body) throw new Error("Build payload failed");
+      if (!body) throw new Error("构建派生数据失败，原会话数据未就绪。");
 
-      const auth = await buildSapisidAuthHeader();
+      // ======= 降维打击：直接克隆合法 Header =======
+      const clonedHeaders = {
+        "content-type": "application/json+protobuf",
+        ...state.capturedHeaders
+      };
+
       const res = await fetch(`${Config.NETWORK.RPC_ORIGIN}${Config.TARGETS.CREATE_PROMPT}`, {
-        method: "POST", credentials: "include",
-        headers: { "content-type": "application/json+protobuf", "x-goog-api-key": state.googleApiKey, "x-goog-authuser": "0", authorization: auth },
+        method: "POST",
+        credentials: "include",
+        headers: clonedHeaders,
         body
       });
+
+      if (!res.ok) throw new Error(`Google 服务器拒绝 (${res.status})`);
 
       const resData = safeParseJSON(await res.text());
       const top = typeof resData?.[0] === "string" ? resData[0] : "";
       const m = top.match(/(?:^|\/)prompts\/([^/?#]+)/);
+
       if (m) {
         const basePathMatch = (location.pathname || "").match(/^(.*\/prompts\/)/);
         location.assign(`${location.origin}${basePathMatch ? basePathMatch[1] : "/prompts/"}${m[1]}`);
+      } else {
+        throw new Error("响应中未找到新分支 ID。");
       }
     } catch (err) {
       navigator.clipboard.writeText(snapshotText);
-      alert("✅ 记忆快照生成完毕！\n受限未能跳转，已复制到剪贴板。");
+      alert(`⚠️ 派生跳转失败\n\n错误原因：${err.message}\n\n已将提取的记忆快照复制到剪贴板，可手动新建对话并粘贴。`);
     } finally {
       Compression.finalizeRun();
     }
@@ -365,11 +428,15 @@ The structure MUST be strictly as follows:
 
   async function fetchAndExtractTurns(promptId) {
     if (!promptId) return [];
-    const auth = await buildSapisidAuthHeader();
     try {
+      const clonedHeaders = {
+        "content-type": "application/json+protobuf",
+        ...state.capturedHeaders
+      };
       const res = await fetch(`${Config.NETWORK.RPC_ORIGIN}${Config.TARGETS.RESOLVE}`, {
-        method: "POST", credentials: "include",
-        headers: { "content-type": "application/json+protobuf", "x-goog-api-key": state.googleApiKey, "x-goog-authuser": "0", authorization: auth },
+        method: "POST",
+        credentials: "include",
+        headers: clonedHeaders,
         body: JSON.stringify([promptId])
       });
       const payload = safeParseJSON(await res.text());
@@ -387,7 +454,7 @@ The structure MUST be strictly as follows:
       const role = entry[8];
       const parts = entry[29];
       if (typeof role === "string" && Array.isArray(parts)) {
-        const text = parts.filter(Array.isArray).map(p => p[1] || "").join("");
+        const text = parts.filter(p => Array.isArray(p) && !p[12]).map(p => p[1] || "").join("");
         if (text) turns.push({ role, text, entry: deepClone(entry) });
       }
     }
@@ -423,9 +490,10 @@ The structure MUST be strictly as follows:
   }
 
   function bootstrap() {
-    NetworkMonitor.init();
+    injectNetworkMonitorToMainWorld();
     UI.init();
   }
+
   bootstrap();
 
 })();
