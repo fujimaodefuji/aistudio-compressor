@@ -1,22 +1,124 @@
 // ==UserScript==
 // @name         AI Studio Chat Compressor (iOS)
 // @namespace    https://fujimaodefuji.github.io/aistudio-compressor
-// @version      1.0.2-ios
-// @description  在 Google AI Studio 提供一键压缩聊天记录 (iOS 移动专版) | 主世界头信息全量克隆，彻底解决无 Key 报 403 无法派生分支的问题
+// @version      1.0.3-ios
+// @description  在 Google AI Studio 提供一键压缩聊天记录 (iOS 移动专版) | 主世界代理发包，增加原生防丢弹窗剪贴板兜底
 // @author       fujimaodefuji
 // @match        https://aistudio.google.com/*
 // @run-at       document-start
-// @grant        GM_registerMenuCommand
-// @grant        GM.registerMenuCommand
+// @grant        none
 // ==/UserScript==
 
 (function () {
   "use strict";
 
-  const DEFAULT_SNAPSHOT_REGEX = "<state_snapshot>[\\s\\S]*?<\\/state_snapshot>";
+  // =========================================================================
+  // 核心黑魔法：主世界 RPC 代理发包 (突破 iOS Safari 所有的网络沙箱拦截)
+  // =========================================================================
+  function injectRPCProxyToMainWorld() {
+    const script = document.createElement('script');
+    script.textContent = `
+            (function() {
+                let lastValidHeaders = null;
 
-  const PRESET_PROMPTS = {
-    narrative: `That concludes the current topic. Please remember the conversation history and switch roles:
+                const origFetch = window.fetch;
+                window.fetch = async function(...args) {
+                    try {
+                        const req = new Request(args[0], args[1]);
+                        const url = req.url || "";
+                        if (url.includes('GenerateContent') || url.includes('CreatePrompt') || url.includes('ResolveDriveResource')) {
+                            const hdrs = {};
+                            req.headers.forEach((value, key) => {
+                                if (key.toLowerCase() !== 'content-length') hdrs[key] = value;
+                            });
+                            if (Object.keys(hdrs).length > 0) lastValidHeaders = hdrs;
+                        }
+                    } catch(e) {}
+                    return origFetch.apply(this, args);
+                };
+
+                window.addEventListener('message', async (e) => {
+                    if (!e.data) return;
+
+                    // 代理执行 ResolveDriveResource (获取历史)
+                    if (e.data.type === 'IOS_RPC_REQ_RESOLVE') {
+                        if (!lastValidHeaders) {
+                            window.postMessage({ type: 'IOS_RPC_RES_RESOLVE', promptId: e.data.promptId, error: 'No headers captured' }, '*');
+                            return;
+                        }
+                        try {
+                            const res = await origFetch("https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ResolveDriveResource", {
+                                method: 'POST', credentials: 'include',
+                                headers: Object.assign({'content-type': 'application/json+protobuf'}, lastValidHeaders),
+                                body: JSON.stringify([e.data.promptId])
+                            });
+                            const text = await res.text();
+                            window.postMessage({ type: 'IOS_RPC_RES_RESOLVE', promptId: e.data.promptId, ok: res.ok, text: text }, '*');
+                        } catch(err) {
+                            window.postMessage({ type: 'IOS_RPC_RES_RESOLVE', promptId: e.data.promptId, error: err.message }, '*');
+                        }
+                    }
+
+                    // 代理执行 CreatePrompt (创建带历史的新分支)
+                    if (e.data.type === 'IOS_RPC_REQ_CREATE') {
+                        if (!lastValidHeaders) {
+                            window.postMessage({ type: 'IOS_RPC_RES_CREATE', error: 'No headers captured' }, '*');
+                            return;
+                        }
+                        try {
+                            const res = await origFetch("https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/CreatePrompt", {
+                                method: 'POST', credentials: 'include',
+                                headers: Object.assign({'content-type': 'application/json+protobuf'}, lastValidHeaders),
+                                body: e.data.body
+                            });
+                            const text = await res.text();
+                            window.postMessage({ type: 'IOS_RPC_RES_CREATE', ok: res.ok, text: text }, '*');
+                        } catch(err) {
+                            window.postMessage({ type: 'IOS_RPC_RES_CREATE', error: err.message }, '*');
+                        }
+                    }
+                });
+            })();
+        `;
+    (document.head || document.documentElement).appendChild(script);
+    script.remove();
+  }
+
+  // 初始化注入主世界代理
+  injectRPCProxyToMainWorld();
+
+  // 封装异步 RPC 调用
+  function rpcResolvePrompt(promptId) {
+    return new Promise((resolve) => {
+      const handler = (e) => {
+        if (e.data && e.data.type === 'IOS_RPC_RES_RESOLVE' && e.data.promptId === promptId) {
+          window.removeEventListener('message', handler);
+          if (e.data.error || !e.data.ok) resolve(null);
+          else resolve(e.data.text);
+        }
+      };
+      window.addEventListener('message', handler);
+      window.postMessage({ type: 'IOS_RPC_REQ_RESOLVE', promptId: promptId }, '*');
+    });
+  }
+
+  function rpcCreatePrompt(bodyString) {
+    return new Promise((resolve, reject) => {
+      const handler = (e) => {
+        if (e.data && e.data.type === 'IOS_RPC_RES_CREATE') {
+          window.removeEventListener('message', handler);
+          if (e.data.error) reject(new Error(e.data.error));
+          else if (!e.data.ok) reject(new Error('Google 拒绝请求 (无凭据)'));
+          else resolve(e.data.text);
+        }
+      };
+      window.addEventListener('message', handler);
+      window.postMessage({ type: 'IOS_RPC_REQ_CREATE', body: bodyString }, '*');
+    });
+  }
+  // =========================================================================
+
+  const PRESET_NARRATIVE = `That concludes the current topic. Please remember the conversation history and switch roles:
 
 You are the Narrative & Context State Compressor for an ongoing interactive roleplay and relationship dialogue.
 When conversation history grows too large, your task is to distill the dynamic context, emotional tone, physical scene, and unresolved plotlines into a concise, structured XML snapshot: <state_snapshot>.
@@ -53,44 +155,12 @@ The structure MUST be strictly as follows:
 <immediate_next_steps>
 [压缩发生瞬间，双方正悬停在哪个对话话题、待完成的身体动作或下一步行动]
 </immediate_next_steps>
-</state_snapshot>`
-  };
+</state_snapshot>`;
 
-  const Config = {
-    TARGETS: {
-      GENERATE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
-      RESOLVE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ResolveDriveResource",
-      CREATE_PROMPT: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/CreatePrompt"
-    },
-    NETWORK: { RPC_ORIGIN: "https://alkalimakersuite-pa.clients6.google.com" },
-    UI: {
-      BUTTON_ID: "compressor-button-ios",
-      TOOLBAR_SELECTORS: [
-        "ms-toolbar .toolbar-right",
-        "ms-playground-toolbar .toolbar-right",
-        ".toolbar-right",
-        "header .right-actions"
-      ],
-      INPUT_SELECTORS: [
-        "ms-autosize-textarea textarea",
-        'textarea[aria-label="Start typing a prompt"]',
-        "textarea"
-      ],
-      SEND_BUTTON_SELECTORS: [
-        "ms-run-button button",
-        'button[aria-label="Run"]',
-        'button[aria-label^="Run"]'
-      ]
-    },
-    PROMPTS: {
-      NARRATIVE: PRESET_PROMPTS.narrative,
-      ACK: "（已同步最新状态与记忆快照，随时可以继续。）"
-    }
-  };
+  const ACK_MSG = "（已同步最新状态与记忆快照，随时可以继续。）";
 
   const state = {
     compressionInProgress: false,
-    capturedHeaders: {}, // 核心：存储全量克隆的合法请求头
     lastResolvedPromptThread: null,
     lastResolvedPromptRoot: null,
     lastResolvedPromptId: null
@@ -98,121 +168,6 @@ The structure MUST be strictly as follows:
 
   let domWatchInterval = null;
   let initialThumbCount = 0;
-
-  // =========================================================================
-  // 黑魔法：主世界注入（Main-World Injection）突破苹果沙箱拦截
-  // 直接把原网页真实发出的合法请求 Headers 偷下来
-  // =========================================================================
-  function injectNetworkMonitorToMainWorld() {
-    const script = document.createElement('script');
-    script.textContent = `
-            (function() {
-                // 1. 劫持原生 Fetch
-                const origFetch = window.fetch;
-                window.fetch = async function(...args) {
-                    try {
-                        const req = new Request(args[0], args[1]);
-                        const url = req.url || "";
-                        if (url.includes('GenerateContent') || url.includes('CreatePrompt') || url.includes('ResolveDriveResource')) {
-                            const headersObj = {};
-                            req.headers.forEach((value, key) => {
-                                if (key.toLowerCase() !== 'content-length') {
-                                    headersObj[key] = value;
-                                }
-                            });
-                            // 偷取完整 Headers 并传回插件层
-                            if (Object.keys(headersObj).length > 0) {
-                                window.postMessage({ type: 'COMP_HEADERS_CAPTURED', data: headersObj }, '*');
-                            }
-                        }
-                    } catch(e) {}
-
-                    const res = await origFetch.apply(this, args);
-
-                    try {
-                        const urlStr = (args[0] && typeof args[0] === 'string') ? args[0] : (args[0] && args[0].url ? args[0].url : "");
-                        if (urlStr.includes('ResolveDriveResource')) {
-                            res.clone().text().then(text => {
-                                window.postMessage({ type: 'COMP_RESOLVE_DATA', data: text }, '*');
-                            }).catch(()=>{});
-                        }
-                    } catch(e) {}
-                    return res;
-                };
-
-                // 2. 劫持原生 XHR（防漏兜底）
-                const origXHR = window.XMLHttpRequest;
-                window.XMLHttpRequest = function() {
-                    const xhr = new origXHR();
-                    let url = '';
-                    let reqHeaders = {};
-
-                    const origOpen = xhr.open;
-                    xhr.open = function(...a) { url = a[1] || ''; return origOpen.apply(this, a); };
-
-                    const origSetHeader = xhr.setRequestHeader;
-                    xhr.setRequestHeader = function(name, val) {
-                        if (name.toLowerCase() !== 'content-length') reqHeaders[name] = val;
-                        return origSetHeader.apply(this, arguments);
-                    };
-
-                    const origSend = xhr.send;
-                    xhr.send = function(...a) {
-                        if (url.includes('GenerateContent') || url.includes('CreatePrompt') || url.includes('ResolveDriveResource')) {
-                            if (Object.keys(reqHeaders).length > 0) {
-                                window.postMessage({ type: 'COMP_HEADERS_CAPTURED', data: reqHeaders }, '*');
-                            }
-                        }
-                        return origSend.apply(this, a);
-                    };
-
-                    xhr.addEventListener('load', function() {
-                        if (url.includes('ResolveDriveResource')) {
-                            window.postMessage({ type: 'COMP_RESOLVE_DATA', data: xhr.responseText }, '*');
-                        }
-                    });
-                    return xhr;
-                };
-            })();
-        `;
-    (document.head || document.documentElement).appendChild(script);
-    script.remove();
-  }
-
-  // 接收主世界传回的关键数据
-  window.addEventListener('message', e => {
-    if (!e.data) return;
-    if (e.data.type === 'COMP_HEADERS_CAPTURED') {
-      state.capturedHeaders = { ...state.capturedHeaders, ...e.data.data };
-    }
-    if (e.data.type === 'COMP_RESOLVE_DATA') {
-      maybeCaptureResolvedPromptThread(e.data.data);
-    }
-  });
-
-  // =========================================================================
-
-  function safeParseJSON(text) {
-    try { return JSON.parse(text); } catch { return null; }
-  }
-
-  function deepClone(val) {
-    return val == null ? val : JSON.parse(JSON.stringify(val));
-  }
-
-  function maybeCaptureResolvedPromptThread(bodyText) {
-    if (typeof bodyText !== "string") return;
-    const payload = safeParseJSON(bodyText);
-    const root = payload?.[0];
-    if (!Array.isArray(root) || root.length < 14) return;
-    const thread = root[13]?.[0];
-    if (!Array.isArray(thread) || !thread.length) return;
-
-    state.lastResolvedPromptRoot = deepClone(root);
-    state.lastResolvedPromptThread = thread.filter(Array.isArray).map(e => deepClone(e));
-    const m = (root[0] || "").match(/(?:^|\/)prompts\/([^/?#]+)/);
-    state.lastResolvedPromptId = m ? m[1] : null;
-  }
 
   const UI = {
     init() {
@@ -222,24 +177,19 @@ The structure MUST be strictly as follows:
       const obs = new MutationObserver(run);
       if (document.body) obs.observe(document.body, { childList: true, subtree: true });
       setInterval(run, 1500);
-
-      try {
-        if (typeof GM_registerMenuCommand === "function") {
-          GM_registerMenuCommand("⚡ 立即压缩当前会话 (iOS)", Compression.run);
-        }
-      } catch (e) {}
     },
     injectButton() {
-      if (!document.getElementById(Config.UI.BUTTON_ID)) {
+      if (!document.getElementById("compressor-button-ios")) {
         let toolbar = null;
-        for (const sel of Config.UI.TOOLBAR_SELECTORS) {
+        const selectors = ["ms-toolbar .toolbar-right", "ms-playground-toolbar .toolbar-right", ".toolbar-right", "header .right-actions"];
+        for (const sel of selectors) {
           toolbar = document.querySelector(sel);
           if (toolbar) break;
         }
         if (toolbar) {
           UI.ensureStyles();
           const btn = document.createElement("button");
-          btn.id = Config.UI.BUTTON_ID;
+          btn.id = "compressor-button-ios";
           btn.className = "ms-button-icon";
           btn.title = "Compress (iOS)";
           btn.innerHTML = `<span class="material-symbols-outlined compressor-icon">docs</span><span class="compressor-spinner"></span>`;
@@ -254,15 +204,75 @@ The structure MUST be strictly as follows:
       style.id = "ios-compressor-style";
       style.textContent = `
             @keyframes ios-spin { 100% { transform: rotate(360deg); } }
-            #${Config.UI.BUTTON_ID} { width: 36px; height: 36px; border: none; background: transparent; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
-            #${Config.UI.BUTTON_ID} .compressor-spinner { width: 18px; height: 18px; border: 2px solid rgba(0,0,0,0.2); border-top-color: currentColor; border-radius: 50%; animation: ios-spin 0.8s linear infinite; display: none; }
-            #${Config.UI.BUTTON_ID}.loading .compressor-spinner { display: block; }
-            #${Config.UI.BUTTON_ID}.loading .compressor-icon { display: none; }`;
+            #compressor-button-ios { width: 36px; height: 36px; border: none; background: transparent; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+            #compressor-button-ios .compressor-spinner { width: 18px; height: 18px; border: 2px solid rgba(0,0,0,0.2); border-top-color: currentColor; border-radius: 50%; animation: ios-spin 0.8s linear infinite; display: none; }
+            #compressor-button-ios.loading .compressor-spinner { display: block; }
+            #compressor-button-ios.loading .compressor-icon { display: none; }`;
       document.head.appendChild(style);
     },
     setLoading(loading) {
-      const btn = document.getElementById(Config.UI.BUTTON_ID);
+      const btn = document.getElementById("compressor-button-ios");
       if (btn) btn.classList.toggle("loading", loading);
+    },
+    // 绝对防丢兜底：原生居中弹窗供用户手动复制快照
+    showFallbackModal(snapshotText, errorMsg) {
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:999999;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box;backdrop-filter:blur(5px);';
+
+      const card = document.createElement('div');
+      card.style.cssText = 'background:#fff;border-radius:16px;width:100%;max-width:400px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,0.3);display:flex;flex-direction:column;gap:12px;';
+
+      const title = document.createElement('h3');
+      title.style.cssText = 'margin:0;color:#ef4444;font-size:18px;font-weight:600;display:flex;align-items:center;gap:6px;';
+      title.innerText = '⚠️ 派生跳转受限';
+
+      const desc = document.createElement('p');
+      desc.style.cssText = 'margin:0;font-size:13px;color:#475569;line-height:1.5;';
+      desc.innerText = `记忆快照已成功提取！但受 iOS 沙箱拦截无法自动创建新对话。\n(${errorMsg})\n\n请点击下方按钮复制快照，并手动点击左上角【New Chat】粘贴。`;
+
+      const textarea = document.createElement('textarea');
+      textarea.style.cssText = 'width:100%;height:180px;border:1px solid #cbd5e1;border-radius:8px;padding:10px;font-family:monospace;font-size:12px;background:#f8fafc;color:#0f172a;resize:none;box-sizing:border-box;';
+      textarea.value = snapshotText;
+      textarea.readOnly = true;
+
+      const btnGroup = document.createElement('div');
+      btnGroup.style.cssText = 'display:flex;gap:10px;justify-content:flex-end;margin-top:5px;';
+
+      const closeBtn = document.createElement('button');
+      closeBtn.innerText = '关闭';
+      closeBtn.style.cssText = 'padding:10px 18px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;color:#334155;font-weight:600;font-size:14px;cursor:pointer;';
+      closeBtn.onclick = () => overlay.remove();
+
+      const copyBtn = document.createElement('button');
+      copyBtn.innerText = '📋 复制快照';
+      copyBtn.style.cssText = 'padding:10px 18px;border-radius:8px;border:none;background:#4f46e5;color:#fff;font-weight:600;font-size:14px;cursor:pointer;flex:1;';
+
+      // 手动点击触发，100%能够突破苹果剪贴板限制
+      copyBtn.onclick = () => {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(snapshotText).then(() => {
+            copyBtn.innerText = '✅ 复制成功';
+            copyBtn.style.background = '#10b981';
+            setTimeout(() => overlay.remove(), 1500);
+          }).catch(() => alert("复制失败，请手动在上方文本框长按全选复制。"));
+        } else {
+          textarea.select();
+          document.execCommand('copy');
+          copyBtn.innerText = '✅ 复制成功';
+          copyBtn.style.background = '#10b981';
+          setTimeout(() => overlay.remove(), 1500);
+        }
+      };
+
+      btnGroup.appendChild(closeBtn);
+      btnGroup.appendChild(copyBtn);
+
+      card.appendChild(title);
+      card.appendChild(desc);
+      card.appendChild(textarea);
+      card.appendChild(btnGroup);
+      overlay.appendChild(card);
+      document.body.appendChild(overlay);
     }
   };
 
@@ -270,17 +280,11 @@ The structure MUST be strictly as follows:
     run() {
       if (state.compressionInProgress) return;
       let textarea = null;
-      for (const sel of Config.UI.INPUT_SELECTORS) {
+      for (const sel of ["ms-autosize-textarea textarea", 'textarea[aria-label="Start typing a prompt"]', "textarea"]) {
         textarea = document.querySelector(sel);
         if (textarea) break;
       }
       if (!textarea) return alert("未找到输入框！");
-
-      // 安全预检：确保已经偷取到了合法头信息
-      if (Object.keys(state.capturedHeaders).length === 0) {
-        alert("🔒 环境安全锁拦截：\n\n请先在当前对话框随便发送一句任意消息（如打个句号）。\n我们需要拦截一次正常通信以获取合法的免登录凭据（Headers），这是避免派生报错的必需步骤！\n\n待模型回复完毕后，再点击本按钮。");
-        return;
-      }
 
       state.compressionInProgress = true;
       UI.setLoading(true);
@@ -288,15 +292,15 @@ The structure MUST be strictly as follows:
       initialThumbCount = countThumbIcons();
 
       const desc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
-      if (desc?.set) desc.set.call(textarea, Config.PROMPTS.NARRATIVE);
-      else textarea.value = Config.PROMPTS.NARRATIVE;
+      if (desc?.set) desc.set.call(textarea, PRESET_NARRATIVE);
+      else textarea.value = PRESET_NARRATIVE;
 
       textarea.dispatchEvent(new InputEvent("input", { bubbles: true }));
       textarea.dispatchEvent(new Event("change", { bubbles: true }));
 
       setTimeout(() => {
         let sendBtn = null;
-        for (const sel of Config.UI.SEND_BUTTON_SELECTORS) {
+        for (const sel of ["ms-run-button button", 'button[aria-label="Run"]', 'button[aria-label^="Run"]']) {
           sendBtn = document.querySelector(sel);
           if (sendBtn && !sendBtn.disabled) break;
         }
@@ -335,7 +339,10 @@ The structure MUST be strictly as follows:
           }
         }
 
-        if (checks > 120) Compression.finalizeRun();
+        if (checks > 180) {
+          alert("生成超时，请检查网络或重试。");
+          Compression.finalizeRun();
+        }
       }, 1000);
     },
     finalizeRun() {
@@ -344,6 +351,9 @@ The structure MUST be strictly as follows:
       UI.setLoading(false);
     }
   };
+
+  function safeParseJSON(text) { try { return JSON.parse(text); } catch { return null; } }
+  function deepClone(val) { return val == null ? val : JSON.parse(JSON.stringify(val)); }
 
   function countThumbIcons() {
     return Array.from(document.querySelectorAll("mat-icon, .material-symbols-outlined")).filter(el => (el.textContent || "").includes("thumb_up")).length;
@@ -375,40 +385,36 @@ The structure MUST be strictly as follows:
       if (state.lastResolvedPromptThread?.length && state.lastResolvedPromptId === currentId) {
         turns = extractResolvedTurns(state.lastResolvedPromptThread);
       } else {
-        turns = await fetchAndExtractTurns(currentId);
+        const fetchedText = await rpcResolvePrompt(currentId);
+        if (fetchedText) {
+          const payload = safeParseJSON(fetchedText);
+          const root = payload?.[0];
+          if (root && root[13]?.[0]) {
+            state.lastResolvedPromptRoot = deepClone(root);
+            turns = extractResolvedTurns(root[13][0]);
+          }
+        }
       }
 
       // 剔除压缩提示词和快照所在的旧记录
       const sanitized = turns.filter(t => !t.text.includes("Narrative & Context State Compressor") && !t.text.includes("<state_snapshot>"));
 
-      // 严谨保留尾部对话（防止截断，默认为原功能算法的简化版，只拿最后8-10轮以避免 Token 超标）
+      // 严谨保留尾部对话（防止超长 Token 截断，保留最后 8 轮交互）
       const preserved = sanitized.slice(-8);
 
       const newTurns = [
         { role: "user", text: snapshotText },
-        { role: "model", text: Config.PROMPTS.ACK },
+        { role: "model", text: ACK_MSG },
         ...preserved
       ];
 
       const body = buildCreatePayload(newTurns);
-      if (!body) throw new Error("构建派生数据失败，原会话数据未就绪。");
+      if (!body) throw new Error("缺少原会话数据");
 
-      // ======= 降维打击：直接克隆合法 Header =======
-      const clonedHeaders = {
-        "content-type": "application/json+protobuf",
-        ...state.capturedHeaders
-      };
+      // 通过主世界代理发包创建新分支
+      const resText = await rpcCreatePrompt(body);
 
-      const res = await fetch(`${Config.NETWORK.RPC_ORIGIN}${Config.TARGETS.CREATE_PROMPT}`, {
-        method: "POST",
-        credentials: "include",
-        headers: clonedHeaders,
-        body
-      });
-
-      if (!res.ok) throw new Error(`Google 服务器拒绝 (${res.status})`);
-
-      const resData = safeParseJSON(await res.text());
+      const resData = safeParseJSON(resText);
       const top = typeof resData?.[0] === "string" ? resData[0] : "";
       const m = top.match(/(?:^|\/)prompts\/([^/?#]+)/);
 
@@ -419,32 +425,11 @@ The structure MUST be strictly as follows:
         throw new Error("响应中未找到新分支 ID。");
       }
     } catch (err) {
-      navigator.clipboard.writeText(snapshotText);
-      alert(`⚠️ 派生跳转失败\n\n错误原因：${err.message}\n\n已将提取的记忆快照复制到剪贴板，可手动新建对话并粘贴。`);
+      // 终极保护触发：抛出美丽的弹窗，用户亲手点击复制按钮
+      UI.showFallbackModal(snapshotText, err.message);
     } finally {
       Compression.finalizeRun();
     }
-  }
-
-  async function fetchAndExtractTurns(promptId) {
-    if (!promptId) return [];
-    try {
-      const clonedHeaders = {
-        "content-type": "application/json+protobuf",
-        ...state.capturedHeaders
-      };
-      const res = await fetch(`${Config.NETWORK.RPC_ORIGIN}${Config.TARGETS.RESOLVE}`, {
-        method: "POST",
-        credentials: "include",
-        headers: clonedHeaders,
-        body: JSON.stringify([promptId])
-      });
-      const payload = safeParseJSON(await res.text());
-      const root = payload?.[0];
-      if (!root || !root[13]?.[0]) return [];
-      state.lastResolvedPromptRoot = deepClone(root);
-      return extractResolvedTurns(root[13][0]);
-    } catch { return []; }
   }
 
   function extractResolvedTurns(entries) {
@@ -490,7 +475,6 @@ The structure MUST be strictly as follows:
   }
 
   function bootstrap() {
-    injectNetworkMonitorToMainWorld();
     UI.init();
   }
 
